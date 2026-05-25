@@ -13,3 +13,4 @@ Current seed fixture:
 - `complex/` — larger workspace with two apps, shared packages, and a transitive `workspace:*` chain
 - `nested-boundary/` — workspace focused on nested `package.json` boundaries inside an app tree
 - `targeting/` — workspace fixture for filtered installs, multi-member manifest edits, and no-match failures
+- `pack/` — workspace fixture for `lpm pack --all`, root-level tsdown bin reuse, workspace JSON envelopes, and multi-member watch rejection

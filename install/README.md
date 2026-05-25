@@ -15,6 +15,7 @@ Current seed fixture:
 - `source-delivery/` — clean consumer project for `lpm add`, alias rewriting, and follow-up remove flows
 - `config-aware/` — clean consumer project for interactive config-aware `lpm add` coverage
 - `read-only-routing/` — mock-registry fixture for `.npmrc`-routed `lpm info`, `lpm resolve`, `lpm search`, and `lpm download` checks when only npm-style endpoints are available
+- `pack/` — local fixture for `lpm pack`, covering missing-tsdown fail-fast plus project-local tsdown resolution and stdout passthrough
 - `upgrade/` — mock-registry fixture for `lpm upgrade` against a public-npm lockfile source
 - `create-project-smoke/` — migrated legacy single-project fixture for bootstrap/create flows
 - `e2e-sandbox/` — migrated legacy single-project fixture for env/sandbox end-to-end behavior
@@ -36,6 +37,7 @@ Relevant runner entries:
 
 - `python3 run_smokes.py install-remove`
 - `python3 run_smokes.py install-read-only-routing`
+- `python3 run_smokes.py install-pack`
 - `python3 run_smokes.py install-upgrade`
 - `python3 run_smokes.py install-uninstall`
 - `python3 run_smokes.py install-uninstall-global`

@@ -30,7 +30,20 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parent
 RUST_CLIENT_ROOT = ROOT.parent / "rust-client"
 LPM_MANIFEST = RUST_CLIENT_ROOT / "Cargo.toml"
-LPM_BIN = RUST_CLIENT_ROOT / "target" / "debug" / "lpm-rs"
+
+
+def resolve_cargo_target_dir() -> Path:
+    configured = os.environ.get("CARGO_TARGET_DIR")
+    if not configured:
+        return RUST_CLIENT_ROOT / "target"
+    target_dir = Path(configured)
+    if target_dir.is_absolute():
+        return target_dir
+    return (RUST_CLIENT_ROOT / target_dir).resolve()
+
+
+LPM_TARGET_DIR = resolve_cargo_target_dir()
+LPM_BIN = LPM_TARGET_DIR / "debug" / "lpm-rs"
 
 DEFAULT_ENV = {
     "NO_COLOR": "1",
@@ -1266,6 +1279,43 @@ def delete_path(path: Path) -> None:
     shutil.rmtree(path)
 
 
+def write_executable(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    path.chmod(path.stat().st_mode | 0o111)
+
+
+def seed_fake_tsdown(binary_path: Path, log_path: Path, marker: str) -> None:
+    script = "\n".join(
+        [
+            "#!/usr/bin/env node",
+            "const fs = require('node:fs')",
+            "const path = require('node:path')",
+            f"const logPath = {json.dumps(str(log_path))}",
+            f"const marker = {json.dumps(marker)}",
+            "fs.mkdirSync(path.dirname(logPath), { recursive: true })",
+            "fs.appendFileSync(logPath, JSON.stringify({ cwd: process.cwd(), args: process.argv.slice(2) }) + '\\n', 'utf8')",
+            "process.stdout.write(marker + '\\n')",
+        ]
+    )
+    write_executable(binary_path, script + "\n")
+
+
+def read_jsonl(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    rows: list[dict[str, object]] = []
+    for line in path.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        rows.append(json.loads(line))
+    return rows
+
+
+def normalize_test_path(path: str) -> str:
+    return path.removeprefix("/private")
+
+
 def reset_single_project_fixture(
     fixture: Path,
     baseline_files: dict[str, str] | None = None,
@@ -1367,6 +1417,21 @@ def reset_workspace_targeting_fixture() -> Path:
         WORKSPACE_TARGETING_CORE_BASELINE_PACKAGE_JSON,
         encoding="utf-8",
     )
+    return fixture
+
+
+def reset_pack_fixture() -> Path:
+    fixture = ROOT / "install" / "pack" / "basic"
+    return reset_single_project_fixture(
+        fixture,
+        extra_delete=["dist"],
+    )
+
+
+def reset_workspace_pack_fixture() -> Path:
+    fixture = reset_workspace_fixture("pack")
+    for rel in ["apps/web/dist", "apps/docs/dist", "packages/core/dist"]:
+        delete_path(fixture / rel)
     return fixture
 
 
@@ -6335,6 +6400,185 @@ def scenario_install_graph_command() -> None:
         )
 
 
+def scenario_install_pack_command() -> None:
+    fixture = reset_pack_fixture().resolve()
+    marker_log = fixture / ".lpm" / "pack-invocations.jsonl"
+    marker_text = "tsdown pack smoke single"
+
+    missing_output = run_command_expect_failure(
+        "install/pack missing tsdown fails fast",
+        fixture,
+        [str(LPM_BIN), "pack", "--entry", "src/index.ts"],
+    )
+    require_contains(
+        missing_output,
+        "tsdown not installed. Run: lpm install -D tsdown",
+        "install/pack missing-tsdown output",
+    )
+
+    seed_fake_tsdown(
+        fixture / "node_modules" / ".bin" / "tsdown",
+        marker_log,
+        marker_text,
+    )
+
+    pack_result = run_command_result(
+        "install/pack forwards lpm-owned flags to project-local tsdown",
+        fixture,
+        [
+            str(LPM_BIN),
+            "pack",
+            "--config",
+            "tsdown.config.ts",
+            "--tsconfig",
+            "tsconfig.pack.json",
+            "--target",
+            "es2022",
+            "--entry",
+            "src/index.ts",
+            "--out-dir",
+            "dist",
+            "--format",
+            "esm",
+            "--platform",
+            "node",
+            "--dts",
+            "--minify",
+            "--sourcemap",
+        ],
+    )
+    if pack_result.returncode != 0:
+        raise SmokeFailure(
+            f"install/pack flag forwarding failed with exit code {pack_result.returncode}"
+        )
+    require_contains(
+        pack_result.stdout,
+        marker_text,
+        "install/pack single-package stdout passthrough",
+    )
+
+    invocations = read_jsonl(marker_log)
+    if len(invocations) != 1:
+        raise SmokeFailure(
+            f"install/pack expected exactly one tsdown invocation, got {len(invocations)}"
+        )
+    invocation = invocations[0]
+    if normalize_test_path(str(invocation.get("cwd"))) != normalize_test_path(str(fixture)):
+        raise SmokeFailure("install/pack expected tsdown cwd to be the project root")
+    expected_args = [
+        "--config",
+        "tsdown.config.ts",
+        "--tsconfig",
+        "tsconfig.pack.json",
+        "--target",
+        "es2022",
+        "src/index.ts",
+        "--out-dir",
+        "dist",
+        "--format",
+        "esm",
+        "--platform",
+        "node",
+        "--dts",
+        "--minify",
+        "--sourcemap",
+    ]
+    if invocation.get("args") != expected_args:
+        raise SmokeFailure(
+            f"install/pack expected forwarded args {expected_args!r}, got {invocation.get('args')!r}"
+        )
+
+
+def scenario_workspace_pack() -> None:
+    fixture = reset_workspace_pack_fixture().resolve()
+    marker_log = fixture / ".lpm" / "pack-workspace-invocations.jsonl"
+    marker_text = "tsdown workspace pack smoke"
+    seed_fake_tsdown(
+        fixture / "node_modules" / ".bin" / "tsdown",
+        marker_log,
+        marker_text,
+    )
+
+    workspace_result = run_command_result(
+        "workspace/pack all json",
+        fixture,
+        [
+            str(LPM_BIN),
+            "pack",
+            "--all",
+            "--json",
+            "--entry",
+            "src/index.ts",
+            "--out-dir",
+            "dist",
+            "--dts",
+        ],
+    )
+    if workspace_result.returncode != 0:
+        raise SmokeFailure(
+            f"workspace/pack --all --json failed with exit code {workspace_result.returncode}"
+        )
+    require_not_contains(
+        workspace_result.stdout + workspace_result.stderr,
+        marker_text,
+        "workspace/pack success stdout should stay inside the member process rather than leak into the workspace envelope",
+    )
+    envelope = json.loads(workspace_result.stdout)
+    if envelope.get("success") is not True:
+        raise SmokeFailure("workspace/pack --all --json: expected success=true")
+    if envelope.get("packages") != 3:
+        raise SmokeFailure("workspace/pack --all --json: expected packages=3")
+    if envelope.get("succeeded") != 3 or envelope.get("failed") != 0:
+        raise SmokeFailure("workspace/pack --all --json: expected 3 succeeded and 0 failed")
+    member_names = {member.get("name") for member in envelope.get("members", [])}
+    if member_names != {"@smoke/pack-web", "@smoke/pack-docs", "@smoke/pack-core"}:
+        raise SmokeFailure(
+            f"workspace/pack --all --json: unexpected member names {sorted(member_names)!r}"
+        )
+
+    invocations = read_jsonl(marker_log)
+    if len(invocations) != 3:
+        raise SmokeFailure(
+            f"workspace/pack expected exactly three tsdown invocations, got {len(invocations)}"
+        )
+    cwd_set = {normalize_test_path(str(row.get("cwd"))) for row in invocations}
+    expected_cwds = {
+        normalize_test_path(str(fixture / "apps" / "web")),
+        normalize_test_path(str(fixture / "apps" / "docs")),
+        normalize_test_path(str(fixture / "packages" / "core")),
+    }
+    if cwd_set != expected_cwds:
+        raise SmokeFailure(
+            f"workspace/pack expected member cwd set {sorted(expected_cwds)!r}, got {sorted(cwd_set)!r}"
+        )
+
+    no_match_output = run_command_expect_failure(
+        "workspace/pack no-match filter",
+        fixture,
+        [str(LPM_BIN), "pack", "--filter", "./missing/*", "--fail-if-no-match"],
+    )
+    require_contains(
+        no_match_output.lower(),
+        "match",
+        "workspace/pack no-match output",
+    )
+
+    watch_output = run_command_expect_failure(
+        "workspace/pack rejects multi-member watch",
+        fixture,
+        [str(LPM_BIN), "pack", "--all", "--entry", "src/index.ts", "--", "--watch"],
+    )
+    require_contains(
+        watch_output,
+        "--watch is not supported",
+        "workspace/pack watch rejection output",
+    )
+    if len(read_jsonl(marker_log)) != 3:
+        raise SmokeFailure(
+            "workspace/pack watch rejection should not spawn extra tsdown invocations"
+        )
+
+
 def scenario_install_dev_command() -> None:
     fixture = reset_dev_fixture().resolve()
     capture_path = fixture / "dev-capture.json"
@@ -8631,6 +8875,10 @@ SCENARIOS = {
         "Run lpm graph coverage for resolved tree output, substring filtering, graph-level depth pruning across json/stats/html, and the --no-open warning contract.",
         scenario_install_graph_command,
     ),
+    "install-pack": (
+        "Run lpm pack smoke coverage for missing-tsdown fail-fast behavior, project-local tsdown resolution, and single-package stdout passthrough with forwarded pack flags.",
+        scenario_install_pack_command,
+    ),
     "install-dev": (
         "Run lpm dev coverage for .env.example bootstrap, env-schema validation vs --no-env-check, explicit --env layering, hermetic HTTPS consent/bootstrap, tunnel inspector/no-inspect/strict inspect-port behavior, single-service arg forwarding, and multi-service dependsOn orchestration.",
         scenario_install_dev_command,
@@ -8762,6 +9010,10 @@ SCENARIOS = {
     "workspace-targeting": (
         "Run filtered workspace installs and assert app-only targets mutate while unmatched filters fail.",
         scenario_workspace_targeting,
+    ),
+    "workspace-pack": (
+        "Run lpm pack workspace E2E coverage for root-bin reuse, per-member JSON envelopes, no-match failures, and multi-member watch rejection.",
+        scenario_workspace_pack,
     ),
     "workspace-uninstall": (
         "Run workspace uninstall coverage for filtered member cleanup, -w root cleanup, and fail-if-no-match.",
