@@ -1,0 +1,8 @@
+{
+  "name": "config-aware-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "@pandacss/dev": "^1.11.1"
+  }
+}

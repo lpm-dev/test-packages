@@ -1,0 +1,8 @@
+{
+    "name": "script-policy-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-script-amber": "^1.0.0"
+    }
+}

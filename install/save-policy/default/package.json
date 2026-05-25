@@ -1,0 +1,8 @@
+{
+  "name": "save-policy-default",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "smoke-save-lib": "*"
+  }
+}

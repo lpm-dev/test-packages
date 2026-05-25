@@ -1,0 +1,14 @@
+{
+  "version": 2,
+  "backups": [
+    {
+      "original": "bun.lock",
+      "backup": "bun.lock.backup"
+    }
+  ],
+  "created": [
+    "lpm.lock",
+    "lpm.lockb",
+    ".gitattributes"
+  ]
+}

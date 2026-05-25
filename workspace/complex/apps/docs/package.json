@@ -1,0 +1,13 @@
+{
+  "name": "@smoke/docs",
+  "private": true,
+  "version": "1.0.0",
+  "dependencies": {
+    "@smoke/ui": "workspace:*",
+    "@smoke/config": "workspace:*",
+    "kleur": "^4.1.5"
+  },
+  "scripts": {
+    "start": "node index.js"
+  }
+}

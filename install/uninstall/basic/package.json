@@ -1,0 +1,25 @@
+{
+  "name": "uninstall-basic-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "smoke-uninstall-dep": "^1.0.0"
+  },
+  "devDependencies": {
+    "smoke-uninstall-dev": "^1.0.0"
+  },
+  "peerDependencies": {
+    "smoke-uninstall-peer": "^1.0.0"
+  },
+  "optionalDependencies": {
+    "smoke-uninstall-optional": "^1.0.0"
+  },
+  "lpm": {
+    "trustedDependencies": {
+      "smoke-uninstall-dep@1.0.0": {
+        "integrity": "sha512-smoke-uninstall",
+        "scriptHash": "sha256-smoke-uninstall"
+      }
+    }
+  }
+}

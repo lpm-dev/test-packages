@@ -1,0 +1,11 @@
+{
+    "name": "outdated-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-outdated-dep": "^1.0.0"
+    },
+    "devDependencies": {
+        "smoke-outdated-dev": "^5.0.0"
+    }
+}

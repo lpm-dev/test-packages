@@ -1,0 +1,39 @@
+{
+  "tasks": {
+    "hello": {
+      "command": "echo ENV=$APP_ENV PORT=$PORT API=$API_BASE_URL TOKEN=$SERVICE_TOKEN"
+    }
+  },
+  "envSchema": {
+    "vars": {
+      "APP_ENV": {
+        "default": "dev"
+      },
+      "PORT": {
+        "format": "port",
+        "default": "3000"
+      },
+      "API_BASE_URL": {
+        "required": true,
+        "format": "url"
+      },
+      "SERVICE_TOKEN": {
+        "required": true,
+        "secret": true,
+        "description": "Service access token"
+      }
+    }
+  },
+  "environments": {
+    "base": ".env",
+    "staging": {
+      "extends": "base",
+      "file": ".env.staging"
+    },
+    "preview": {
+      "extends": "staging",
+      "file": ".env.preview"
+    }
+  },
+  "vault": "a347a01f-3471-433c-9164-8da399c34ce1"
+}

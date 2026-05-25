@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "zod": "^4.4.3",
+    "@pandacss/dev": "^1.11.1"
+  }
+}

@@ -1,0 +1,5 @@
+# LPM wrapper tree
+.lpm/wrappers/
+
+# LPM hoisted state (auto-generated)
+.lpm/hoisted/

@@ -1,0 +1,8 @@
+{
+  "name": "project-discovery-nearest-ancestor",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "kleur": "^4.1.5"
+  }
+}

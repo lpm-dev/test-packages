@@ -1,0 +1,12 @@
+{
+  "name": "trust-command-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "smoke-trust-scripted": "^1.0.0",
+    "smoke-trust-keep": "^1.0.0"
+  },
+  "lpm": {
+    "trustedDependencies": {}
+  }
+}

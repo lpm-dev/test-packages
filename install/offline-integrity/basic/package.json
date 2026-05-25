@@ -1,0 +1,8 @@
+{
+    "name": "offline-integrity-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-offline-lib": "http://127.0.0.1:60212/smoke-offline-lib-1.0.0.tgz#sha512-cMwWK5XY1oXZbeIm9M3PTr0p0R+UgyTAx3yIMRZEDrgD+9E34BsD97bm7ViZ7CdoBTQc74OsiWRdywD4Fu31zA=="
+    }
+}

@@ -1,0 +1,10 @@
+{
+    "name": "query-command-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "query-eval-pkg": "^1.0.0",
+        "query-network-pkg": "^1.0.0",
+        "query-clean-pkg": "^1.0.0"
+    }
+}

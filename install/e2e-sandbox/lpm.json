@@ -1,0 +1,39 @@
+{
+  "tasks": {
+    "hello": {
+      "command": "echo ENV=$APP_ENV PORT=$PORT DB=$DATABASE_URL STRIPE=$STRIPE_KEY"
+    }
+  },
+  "envSchema": {
+    "vars": {
+      "APP_ENV": {
+        "default": "dev"
+      },
+      "PORT": {
+        "format": "port",
+        "default": "3000"
+      },
+      "DATABASE_URL": {
+        "required": true,
+        "format": "url"
+      },
+      "STRIPE_KEY": {
+        "required": true,
+        "secret": true,
+        "description": "Stripe Secret Key"
+      }
+    }
+  },
+  "environments": {
+    "base": ".env",
+    "staging": {
+      "extends": "base",
+      "file": ".env.staging"
+    },
+    "preview": {
+      "extends": "staging",
+      "file": ".env.preview"
+    }
+  },
+  "vault": "6a820c20-c963-43cc-af30-5dc32745a653"
+}

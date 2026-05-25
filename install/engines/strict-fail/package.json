@@ -1,0 +1,8 @@
+{
+    "name": "engines-strict-fail",
+    "private": true,
+    "version": "0.0.0",
+    "engines": {
+        "lpm": ">=999.0.0"
+    }
+}

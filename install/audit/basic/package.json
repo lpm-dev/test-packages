@@ -1,0 +1,9 @@
+{
+    "name": "audit-command-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "audit-eval-pkg": "^1.0.0",
+        "audit-clean-pkg": "^1.0.0"
+    }
+}

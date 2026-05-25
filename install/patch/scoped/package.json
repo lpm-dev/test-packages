@@ -1,0 +1,16 @@
+{
+  "name": "patch-scoped-command-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "@smoke/patch-lib": "^1.0.0"
+  },
+  "lpm": {
+    "patchedDependencies": {
+      "@smoke/patch-lib@1.0.0": {
+        "path": "patches/@smoke__patch-lib@1.0.0.patch",
+        "originalIntegrity": "sha512-/JIj2lw3iBKfIAuXi/ulNG7SzFaoG2g7MnH0EsV/fqBds0J1OK4NMylKp1DTYusw2JfsLWK/VSt3OK3GEHtAPQ=="
+      }
+    }
+  }
+}

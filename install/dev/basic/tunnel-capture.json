@@ -1,0 +1,19 @@
+{
+  "args": [
+    "--port",
+    "65121",
+    "--capture",
+    "tunnel-capture.json"
+  ],
+  "env": {
+    "BASE": "from-example",
+    "SHARED": "from-local",
+    "LOCAL_ONLY": "from-local",
+    "STAGE_ONLY": null,
+    "LOCAL_STAGE": null,
+    "REQUIRED_TOKEN": null,
+    "NODE_EXTRA_CA_CERTS": null,
+    "SSL_CERT_FILE": null,
+    "SSL_KEY_FILE": null
+  }
+}

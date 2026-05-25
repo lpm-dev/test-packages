@@ -1,0 +1,14 @@
+{
+  "name": "engines-config-optout",
+  "private": true,
+  "version": "0.0.0",
+  "engines": {
+    "lpm": ">=999.0.0"
+  },
+  "lpm": {
+    "engineStrict": false
+  },
+  "dependencies": {
+    "kleur": "^4.1.5"
+  }
+}

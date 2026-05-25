@@ -1,0 +1,9 @@
+**/.DS_Store
+**/__pycache__/
+**/*.pyc
+**/.lpm/
+**/node_modules/
+**/lpm.lock
+**/lpm.lockb
+**/dist/
+*.log

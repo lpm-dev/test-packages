@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "backups": [
+    {
+      "original": "pnpm-lock.yaml",
+      "backup": "pnpm-lock.yaml.backup"
+    },
+    {
+      "original": "package.json",
+      "backup": "package.json.backup"
+    }
+  ],
+  "created": [
+    "lpm.lock",
+    "lpm.lockb",
+    ".gitattributes"
+  ]
+}

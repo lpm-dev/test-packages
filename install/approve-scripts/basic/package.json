@@ -1,0 +1,19 @@
+{
+  "name": "approve-scripts-command-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "smoke-approve-scripted": "^1.0.0"
+  },
+  "lpm": {
+    "trustedDependencies": {
+      "smoke-approve-scripted@1.0.0": {
+        "integrity": "sha512-dVSeRKDPzh41Itrk73AFCqAlFu+JPzUAPzdHpfs2m0yIRZWyUrH2Yh29Urw7sf9Y5loNLY37gHfHfPjmCSsmYw==",
+        "scriptHash": "sha256-69a334d415d574ccba282bef455846080e1f612b85e37a9a58ca9cc678b0dd2c",
+        "provenanceAtApproval": {
+          "present": false
+        }
+      }
+    }
+  }
+}

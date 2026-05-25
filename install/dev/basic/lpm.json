@@ -1,0 +1,9 @@
+{
+    "envSchema": {
+        "vars": {
+            "REQUIRED_TOKEN": {
+                "required": true
+            }
+        }
+    }
+}

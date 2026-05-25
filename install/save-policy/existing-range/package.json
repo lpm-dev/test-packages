@@ -1,0 +1,8 @@
+{
+    "name": "save-policy-existing-range",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-save-lib": "~1.2.3"
+    }
+}
