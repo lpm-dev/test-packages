@@ -1,1 +1,1 @@
-export { token } from "@smoke/pack-core"
+export { token } from "@smoke/pack-core";

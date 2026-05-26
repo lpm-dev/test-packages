@@ -1,1 +1,1 @@
-export const token = "pack-smoke"
+export const token = "pack-smoke";
