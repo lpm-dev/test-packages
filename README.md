@@ -36,6 +36,7 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/cache/prune` — local fixture for direct `lpm cache prune` runs, covering missing-registry and corrupt-registry degraded modes plus `--project`/`--max-age` orphan cleanup on a seeded v2 store
 - `install/store` — local fixture for direct `lpm store` runs, covering path output, fast-vs-deep verify semantics, `--fix` security-cache refreshes, and blunt `clean` wipes across both v1 and v2 store state
 - `install/graph` — local fixture for direct `lpm graph` runs, covering resolved tree output, substring `--filter` semantics, graph-level depth pruning across json/stats/html, and the `--no-open` warning contract
+- `install/pack` — local fixture for direct `lpm pack` runs, covering missing-tsdown fail-fast behavior plus project-local tsdown resolution and direct single-package stdout passthrough
 - `install/dev` — local fixture set for direct `lpm dev` runs, covering `.env.example` bootstrap, env-schema validation vs `--no-env-check`, explicit `--env` layering, forwarded args after `--`, the `--no-install` startup banner, hermetic `--https` consent/bootstrap behavior, successful loopback tunnel hello plus persisted inspector session state and `--tunnel-auth`, refresh-backed tunnel inspector/no-inspect/strict inspect-port behavior, and multi-service `dependsOn` orchestration with cross-service env injection
 - `install/tunnel` — local fixture for direct `lpm tunnel` runs, covering auth-gated relay actions plus local `inspect`, `log`, and `replay` behavior from seeded on-disk webhook logs
 - `install/ports` — local fixture for direct `lpm ports` runs, covering declared-port listing, missing-port kill failures, live owner termination, and per-project `ports.toml` reset semantics
@@ -73,3 +74,4 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `workspace/complex` — larger workspace fixture with multiple apps, shared packages, and transitive workspace links
 - `workspace/nested-boundary` — workspace fixture with a nested non-workspace child package for boundary regressions
 - `workspace/targeting` — workspace fixture for `--filter`, `-w`, multi-member writes, uninstall targeting, and `--fail-if-no-match`
+- `workspace/pack` — workspace fixture for `lpm pack --all`, root-level tsdown bin reuse, workspace JSON envelopes, and multi-member watch rejection
