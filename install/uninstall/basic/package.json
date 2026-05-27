@@ -2,12 +2,8 @@
   "name": "uninstall-basic-smoke",
   "private": true,
   "version": "0.0.0",
-  "dependencies": {
-    "smoke-uninstall-dep": "^1.0.0"
-  },
-  "devDependencies": {
-    "smoke-uninstall-dev": "^1.0.0"
-  },
+  "dependencies": {},
+  "devDependencies": {},
   "peerDependencies": {
     "smoke-uninstall-peer": "^1.0.0"
   },

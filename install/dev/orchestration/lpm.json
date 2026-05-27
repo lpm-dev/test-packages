@@ -1,38 +1,35 @@
 {
-  "services": {
-    "db": {
-      "command": "node service-runner.cjs --service db --capture orchestration-events.jsonl --listen-delay-ms 250 --wait-ms 1200",
-      "port": 65197,
-      "readyPort": 65197,
-      "readyTimeout": 5
-    },
-    "api": {
-      "command": "node service-runner.cjs --service api --capture orchestration-events.jsonl --require-url-env DB_URL --listen-delay-ms 250 --wait-ms 900",
-      "port": 65198,
-      "readyUrl": "http://127.0.0.1:65198/health",
-      "readyTimeout": 5,
-      "dependsOn": [
-        "db"
-      ],
-      "env": {
-        "API_SENTINEL": "from-config"
-      }
-    },
-    "web": {
-      "command": "node service-runner.cjs --service web --capture orchestration-events.jsonl --require-url-env API_URL --wait-ms 600",
-      "port": 65199,
-      "readyPort": 65199,
-      "readyTimeout": 5,
-      "dependsOn": [
-        "api"
-      ],
-      "primary": true,
-      "env": {
-        "WEB_SENTINEL": "from-config"
-      }
+    "services": {
+        "db": {
+            "command": "node service-runner.cjs --service db --capture orchestration-events.jsonl --listen-delay-ms 250 --wait-ms 1200",
+            "port": 51886,
+            "readyPort": 51886,
+            "readyTimeout": 5
+        },
+        "api": {
+            "command": "node service-runner.cjs --service api --capture orchestration-events.jsonl --require-url-env DB_URL --listen-delay-ms 250 --wait-ms 900",
+            "port": 51887,
+            "readyUrl": "http://127.0.0.1:51887/health",
+            "readyTimeout": 5,
+            "dependsOn": [
+                "db"
+            ],
+            "env": {
+                "API_SENTINEL": "from-config"
+            }
+        },
+        "web": {
+            "command": "node service-runner.cjs --service web --capture orchestration-events.jsonl --require-url-env API_URL --wait-ms 600",
+            "port": 51888,
+            "readyPort": 51888,
+            "readyTimeout": 5,
+            "dependsOn": [
+                "api"
+            ],
+            "primary": true,
+            "env": {
+                "WEB_SENTINEL": "from-config"
+            }
+        }
     }
-  },
-  "runtime": {
-    "node": "22.22.3"
-  }
 }

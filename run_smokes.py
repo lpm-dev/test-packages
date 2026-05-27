@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+from contextlib import contextmanager
 import hashlib
 import io
 import json
@@ -50,6 +51,12 @@ DEFAULT_ENV = {
     "FORCE_COLOR": "0",
     "CLICOLOR": "0",
 }
+
+REAL_HOME = os.environ.get("HOME")
+REAL_CARGO_HOME = os.environ.get("CARGO_HOME")
+REAL_RUSTUP_HOME = os.environ.get("RUSTUP_HOME")
+
+NATIVE_SECURITY_UNLOCK_ENV = "LPM_SMOKE_NATIVE_SECURITY_UNLOCK"
 
 CONFIG_AWARE_BASELINE_PACKAGE_JSON = """{
   \"name\": \"config-aware-smoke\",
@@ -1053,7 +1060,49 @@ def merged_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env.update(DEFAULT_ENV)
     if extra:
         env.update(extra)
+        if "LPM_HOME" in extra and "HOME" not in extra:
+            env["HOME"] = extra["LPM_HOME"]
     return env
+
+
+@contextmanager
+def isolated_default_smoke_home() -> Path:
+    previous_home = os.environ.get("HOME")
+    previous_lpm_home = os.environ.get("LPM_HOME")
+    lpm_home = Path(tempfile.mkdtemp(prefix="lpm-smoke-default-home-"))
+
+    os.environ["HOME"] = str(lpm_home)
+    os.environ["LPM_HOME"] = str(lpm_home)
+    try:
+        yield lpm_home
+    finally:
+        if previous_home is None:
+            os.environ.pop("HOME", None)
+        else:
+            os.environ["HOME"] = previous_home
+
+        if previous_lpm_home is None:
+            os.environ.pop("LPM_HOME", None)
+        else:
+            os.environ["LPM_HOME"] = previous_lpm_home
+
+        cleanup_error: OSError | None = None
+        for _ in range(10):
+            try:
+                shutil.rmtree(lpm_home)
+                cleanup_error = None
+                break
+            except FileNotFoundError:
+                cleanup_error = None
+                break
+            except OSError as error:
+                cleanup_error = error
+                time.sleep(0.05)
+
+        if cleanup_error is not None:
+            raise SmokeFailure(
+                f"failed to clean isolated smoke home {lpm_home}: {cleanup_error}"
+            )
 
 
 def fnv1a_64_hex(value: str) -> str:
@@ -1239,15 +1288,16 @@ def seed_refresh_backed_session(
     expires_at: str,
 ) -> None:
     cargo_env = dict(auth_env)
-    real_home = os.environ.get("HOME")
-    if "CARGO_HOME" not in cargo_env and real_home:
-        cargo_env["CARGO_HOME"] = os.environ.get(
-            "CARGO_HOME", str(Path(real_home) / ".cargo")
-        )
-    if "RUSTUP_HOME" not in cargo_env and real_home:
-        cargo_env["RUSTUP_HOME"] = os.environ.get(
-            "RUSTUP_HOME", str(Path(real_home) / ".rustup")
-        )
+    if "CARGO_HOME" not in cargo_env:
+        if REAL_CARGO_HOME:
+            cargo_env["CARGO_HOME"] = REAL_CARGO_HOME
+        elif REAL_HOME:
+            cargo_env["CARGO_HOME"] = str(Path(REAL_HOME) / ".cargo")
+    if "RUSTUP_HOME" not in cargo_env:
+        if REAL_RUSTUP_HOME:
+            cargo_env["RUSTUP_HOME"] = REAL_RUSTUP_HOME
+        elif REAL_HOME:
+            cargo_env["RUSTUP_HOME"] = str(Path(REAL_HOME) / ".rustup")
 
     run_command(
         "seed refresh-backed session",
@@ -1455,6 +1505,25 @@ def reset_script_policy_fixture(name: str, dependency_name: str) -> Path:
                     "private": True,
                     "version": "0.0.0",
                     "dependencies": {dependency_name: "^1.0.0"},
+                },
+                indent=4,
+            )
+            + "\n"
+        },
+        extra_delete=[".npmrc"],
+    )
+
+
+def reset_security_fixture(name: str) -> Path:
+    fixture = ROOT / "install" / "security" / name
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={
+            "package.json": json.dumps(
+                {
+                    "name": f"security-smoke-{name}",
+                    "private": True,
+                    "version": "0.0.0",
                 },
                 indent=4,
             )
@@ -2162,10 +2231,11 @@ def run_interactive_command(
     cwd: Path,
     args: list[str],
     prompts: list[tuple[str, str]],
+    extra_env: dict[str, str] | None = None,
     timeout_seconds: int = 600,
 ) -> str:
     log(f"{label}: {' '.join(args)}")
-    env = merged_env()
+    env = merged_env(extra_env)
     pid, fd = pty.fork()
 
     if pid == 0:
@@ -2213,6 +2283,90 @@ def run_interactive_command(
             if exit_code != 0:
                 raise SmokeFailure(f"{label} failed with exit code {exit_code}")
             return transcript
+
+
+def parse_json_stdout(label: str, result: subprocess.CompletedProcess[str]) -> dict[str, object]:
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as error:
+        raise SmokeFailure(
+            f"{label}: expected JSON on stdout, got {result.stdout!r}"
+        ) from error
+
+    if not isinstance(payload, dict):
+        raise SmokeFailure(f"{label}: expected top-level JSON object")
+    return payload
+
+
+def require_success_payload(
+    label: str,
+    result: subprocess.CompletedProcess[str],
+    payload_key: str,
+) -> dict[str, object]:
+    if result.returncode != 0:
+        raise SmokeFailure(f"{label} failed with exit code {result.returncode}")
+
+    envelope = parse_json_stdout(label, result)
+    if envelope.get("success") is not True:
+        raise SmokeFailure(f"{label}: expected success=true JSON envelope")
+
+    payload = envelope.get(payload_key)
+    if not isinstance(payload, dict):
+        raise SmokeFailure(f"{label}: expected `{payload_key}` object in JSON envelope")
+    return payload
+
+
+def require_security_approval_envelope(
+    label: str,
+    result: subprocess.CompletedProcess[str],
+    expected_scope: str,
+) -> dict[str, object]:
+    if result.returncode == 0:
+        raise SmokeFailure(f"{label}: unexpectedly succeeded")
+
+    envelope = parse_json_stdout(label, result)
+    if envelope.get("success") is not False:
+        raise SmokeFailure(f"{label}: expected success=false JSON envelope")
+
+    error = envelope.get("error")
+    if not isinstance(error, dict):
+        raise SmokeFailure(f"{label}: expected error object in JSON envelope")
+    if error.get("code") != "SECURITY_APPROVAL_REQUIRED":
+        raise SmokeFailure(
+            f"{label}: expected SECURITY_APPROVAL_REQUIRED, got {error.get('code')!r}"
+        )
+
+    requested_scopes = error.get("requested_scopes")
+    if not isinstance(requested_scopes, list) or expected_scope not in requested_scopes:
+        raise SmokeFailure(
+            f"{label}: expected requested_scopes to include {expected_scope!r}, got {requested_scopes!r}"
+        )
+    return envelope
+
+
+def require_audit_event(
+    rows: list[dict[str, object]],
+    *,
+    event: str,
+    allowed: bool,
+    expected_scope: str,
+    context: str,
+) -> dict[str, object]:
+    for row in rows:
+        candidate = row.get("payload") if isinstance(row.get("payload"), dict) else row
+        scopes = candidate.get("scopes") if isinstance(candidate, dict) else None
+        if (
+            isinstance(candidate, dict)
+            and candidate.get("event") == event
+            and candidate.get("allowed") == allowed
+            and isinstance(scopes, list)
+            and expected_scope in scopes
+        ):
+            return candidate
+
+    raise SmokeFailure(
+        f"{context}: expected audit event {event!r} allowed={allowed} scope={expected_scope!r}"
+    )
 
 
 def require_contains(text: str, needle: str, context: str) -> None:
@@ -2628,8 +2782,8 @@ def scenario_install_uninstall() -> None:
     require_not_exists(fixture / "node_modules" / "smoke-uninstall-dep")
     require_not_exists(fixture / "node_modules" / "smoke-uninstall-dev")
     require_exists(fixture / "node_modules" / "smoke-uninstall-optional")
-    require_not_exists(fixture / "lpm.lock")
-    require_not_exists(fixture / "lpm.lockb")
+    require_exists(fixture / "lpm.lock")
+    require_exists(fixture / "lpm.lockb")
 
 
 def scenario_install_upgrade() -> None:
@@ -3147,8 +3301,8 @@ def scenario_workspace_uninstall() -> None:
 
     require_not_exists(fixture / "apps" / "web" / "node_modules" / "smoke-uninstall-leaf")
     require_exists(fixture / "apps" / "docs" / "node_modules" / "smoke-uninstall-leaf")
-    require_not_exists(fixture / "apps" / "web" / "lpm.lock")
-    require_not_exists(fixture / "apps" / "web" / "lpm.lockb")
+    require_exists(fixture / "apps" / "web" / "lpm.lock")
+    require_exists(fixture / "apps" / "web" / "lpm.lockb")
     require_exists(fixture / "apps" / "docs" / "lpm.lock")
     require_exists(fixture / "apps" / "docs" / "lpm.lockb")
     require_exists(fixture / "lpm.lock")
@@ -3173,8 +3327,8 @@ def scenario_workspace_uninstall() -> None:
         raise SmokeFailure("workspace/uninstall root package.json: expected root dependency to be removed")
 
     require_not_exists(fixture / "node_modules" / "smoke-uninstall-root")
-    require_not_exists(fixture / "lpm.lock")
-    require_not_exists(fixture / "lpm.lockb")
+    require_exists(fixture / "lpm.lock")
+    require_exists(fixture / "lpm.lockb")
     if docs_manifest_path.read_text(encoding="utf-8") != json.dumps(docs_manifest, indent=4) + "\n":
         raise SmokeFailure("workspace/uninstall root package.json: expected docs manifest to stay unchanged")
 
@@ -3480,6 +3634,7 @@ def scenario_install_script_policy() -> None:
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
+            "--no-security-summary",
         ]
 
         default_deny_fixture = reset_script_policy_fixture("default-deny", "smoke-script-green")
@@ -3500,50 +3655,75 @@ def scenario_install_script_policy() -> None:
                 "install/script-policy default deny output: expected a script-policy hint"
             )
 
-        triage_green_fixture = reset_script_policy_fixture("triage-green", "smoke-script-green")
-        write_registry_npmrc(triage_green_fixture, registry.registry_url)
-        triage_green_output = run_command(
-            "install/script-policy triage green auto-build",
-            triage_green_fixture,
+        allow_fixture = reset_script_policy_fixture("manifest-allow", "smoke-script-green")
+        write_registry_npmrc(allow_fixture, registry.registry_url)
+        write_package_json(
+            allow_fixture / "package.json",
+            {
+                "name": "script-policy-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {"smoke-script-green": "^1.0.0"},
+                "lpm": {"scriptPolicy": "allow"},
+            },
+        )
+        allow_result = run_command_result(
+            "install/script-policy manifest allow requires approval",
+            allow_fixture,
             [
                 str(LPM_BIN),
+                "--json",
                 "install",
-                "--triage",
                 "--auto-build",
                 *install_flags,
             ],
             extra_env=scenario_env,
         )
-        require_exists(triage_green_fixture / "node_modules" / "smoke-script-green" / "script-ran.txt")
+        allow_envelope = require_security_approval_envelope(
+            "install/script-policy manifest allow requires approval",
+            allow_result,
+            "scripts-allow",
+        )
         if (
-            "green-tier classification" not in triage_green_output
-            and "1 green" not in triage_green_output
+            allow_envelope.get("error", {}).get("suggested_command")
+            != "lpm security unlock scripts-allow --project . --ttl 10m"
         ):
             raise SmokeFailure(
-                "install/script-policy triage green output: expected green-tier classification hint"
+                "install/script-policy manifest allow suggested command: expected project unlock hint"
             )
+        require_not_exists(allow_fixture / "node_modules" / "smoke-script-green" / "script-ran.txt")
 
-        triage_amber_fixture = reset_script_policy_fixture("triage-amber", "smoke-script-amber")
-        write_registry_npmrc(triage_amber_fixture, registry.registry_url)
-        run_command(
-            "install/script-policy triage amber blocked",
-            triage_amber_fixture,
+        triage_fixture = reset_script_policy_fixture("manifest-triage", "smoke-script-amber")
+        write_registry_npmrc(triage_fixture, registry.registry_url)
+        write_package_json(
+            triage_fixture / "package.json",
+            {
+                "name": "script-policy-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {"smoke-script-amber": "^1.0.0"},
+                "lpm": {"scriptPolicy": "triage"},
+            },
+        )
+        triage_result = run_command_result(
+            "install/script-policy manifest triage requires approval",
+            triage_fixture,
             [
                 str(LPM_BIN),
+                "--json",
                 "install",
-                "--triage",
                 "--auto-build",
                 *install_flags,
             ],
             extra_env=scenario_env,
         )
-        require_not_exists(triage_amber_fixture / "node_modules" / "smoke-script-amber" / "script-ran.txt")
-        require_exists(triage_amber_fixture / ".lpm" / "build-state.json")
-        require_contains(
-            read_optional_text(triage_amber_fixture / ".lpm" / "build-state.json"),
-            "smoke-script-amber",
-            "install/script-policy triage amber build-state",
+        require_security_approval_envelope(
+            "install/script-policy manifest triage requires approval",
+            triage_result,
+            "scripts-triage",
         )
+        require_not_exists(triage_fixture / "node_modules" / "smoke-script-amber" / "script-ran.txt")
+        require_not_exists(triage_fixture / ".lpm" / "build-state.json")
 
 
 def scenario_install_offline_integrity() -> None:
@@ -3720,21 +3900,18 @@ def scenario_install_minimum_release_age() -> None:
                 "dependencies": {package_name: version},
             },
         )
-        allow_new_output = run_command(
-            "install/minimum-release-age allow-new bypass",
+        allow_new_result = run_command_result(
+            "install/minimum-release-age allow-new requires approval",
             allow_new_fixture,
-            [str(LPM_BIN), "install", "--allow-new", *install_flags],
+            [str(LPM_BIN), "--json", "install", "--allow-new", *install_flags],
             extra_env=scenario_env,
         )
-        require_not_contains(
-            allow_new_output,
-            "published too recently",
-            "install/minimum-release-age allow-new output",
+        require_security_approval_envelope(
+            "install/minimum-release-age allow-new requires approval",
+            allow_new_result,
+            "cooldown-bypass",
         )
-        if read_installed_package_version(allow_new_fixture, package_name) != version:
-            raise SmokeFailure(
-                "install/minimum-release-age allow-new bypass: expected installed version 1.0.0"
-            )
+        require_not_exists(allow_new_fixture / "node_modules")
 
         zero_fixture = reset_minimum_release_age_fixture()
         write_registry_npmrc(zero_fixture, registry.registry_url)
@@ -3747,21 +3924,50 @@ def scenario_install_minimum_release_age() -> None:
                 "dependencies": {package_name: version},
             },
         )
-        zero_output = run_command(
-            "install/minimum-release-age zero disables cooldown",
+        zero_result = run_command_result(
+            "install/minimum-release-age zero requires approval",
             zero_fixture,
-            [str(LPM_BIN), "install", "--min-release-age=0", *install_flags],
+            [str(LPM_BIN), "--json", "install", "--min-release-age=0", *install_flags],
             extra_env=scenario_env,
         )
-        require_not_contains(
-            zero_output,
-            "published too recently",
-            "install/minimum-release-age zero output",
+        require_security_approval_envelope(
+            "install/minimum-release-age zero requires approval",
+            zero_result,
+            "cooldown-bypass",
         )
-        if read_installed_package_version(zero_fixture, package_name) != version:
+        require_not_exists(zero_fixture / "node_modules")
+
+        proposal_fixture = reset_minimum_release_age_fixture()
+        write_registry_npmrc(proposal_fixture, registry.registry_url)
+        write_package_json(
+            proposal_fixture / "package.json",
+            {
+                "name": "minimum-release-age-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {package_name: version},
+                "lpm": {"minimumReleaseAge": 0},
+            },
+        )
+        proposal_result = run_command_result(
+            "install/minimum-release-age package.json proposal requires approval",
+            proposal_fixture,
+            [str(LPM_BIN), "--json", "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        proposal_envelope = require_security_approval_envelope(
+            "install/minimum-release-age package.json proposal requires approval",
+            proposal_result,
+            "cooldown-bypass",
+        )
+        if (
+            proposal_envelope.get("error", {}).get("suggested_command")
+            != "lpm security unlock cooldown-bypass --project . --ttl 10m"
+        ):
             raise SmokeFailure(
-                "install/minimum-release-age zero disables cooldown: expected installed version 1.0.0"
+                "install/minimum-release-age package.json proposal suggested command: expected project unlock hint"
             )
+        require_not_exists(proposal_fixture / "node_modules")
 
         pinned_fixture = reset_minimum_release_age_fixture()
         write_registry_npmrc(pinned_fixture, registry.registry_url)
@@ -3783,6 +3989,310 @@ def scenario_install_minimum_release_age() -> None:
             package_name,
             "install/minimum-release-age pinned package.json",
         )
+
+
+def scenario_install_security() -> None:
+    package_name = "smoke-security-release"
+    version = "1.0.0"
+    install_flags = [
+        "--no-skills",
+        "--no-editor-setup",
+        "--no-security-summary",
+    ]
+    registry_packages = [
+        {
+            "name": package_name,
+            "dist_tags": {"latest": version},
+            "versions": {
+                version: {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                    "published_at": iso8601_n_secs_ago(3600),
+                }
+            },
+        }
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as lpm_home:
+        scenario_env = {
+            "LPM_HOME": lpm_home,
+            "LPM_FORCE_FILE_AUTH": "1",
+            "LPM_FORCE_FILE_VAULT": "1",
+        }
+        audit_path = Path(lpm_home) / "security" / "audit.jsonl"
+
+        status_fixture = reset_security_fixture("status")
+        status_result = run_command_result(
+            "install/security status project json",
+            status_fixture,
+            [str(LPM_BIN), "--json", "security", "status", "--project", "."],
+            extra_env=scenario_env,
+        )
+        status = require_success_payload(
+            "install/security status project json",
+            status_result,
+            "status",
+        )
+        if status.get("target") != "project":
+            raise SmokeFailure("install/security status project json: expected target=project")
+        expected_project_root = normalize_test_path(str(status_fixture.resolve()))
+        if normalize_test_path(str(status.get("project_root"))) != expected_project_root:
+            raise SmokeFailure(
+                "install/security status project json: expected project_root to match fixture"
+            )
+        effective_floor = status.get("effective_floor")
+        if not isinstance(effective_floor, dict):
+            raise SmokeFailure("install/security status project json: expected effective_floor object")
+        if effective_floor.get("script_policy") != "deny":
+            raise SmokeFailure("install/security status project json: expected script_policy=deny")
+        if effective_floor.get("minimum_release_age_secs") != 86400:
+            raise SmokeFailure(
+                "install/security status project json: expected minimum_release_age_secs=86400"
+            )
+        if effective_floor.get("sandbox_mode") != "default":
+            raise SmokeFailure("install/security status project json: expected sandbox_mode=default")
+        if effective_floor.get("sandbox_allow_degraded") is not False:
+            raise SmokeFailure(
+                "install/security status project json: expected sandbox_allow_degraded=false"
+            )
+        if effective_floor.get("sigstore_verify") != "deny":
+            raise SmokeFailure("install/security status project json: expected sigstore_verify=deny")
+        expected_approved_posture_path = normalize_test_path(
+            str((Path(lpm_home) / "security" / "approved-posture.json").resolve())
+        )
+        if normalize_test_path(str(status.get("approved_posture_path"))) != expected_approved_posture_path:
+            raise SmokeFailure(
+                "install/security status project json: expected approved_posture_path inside isolated LPM_HOME"
+            )
+
+        status_human = run_command(
+            "install/security status project human",
+            status_fixture,
+            [str(LPM_BIN), "security", "status", "--project", "."],
+            extra_env=scenario_env,
+        )
+        for needle, context in [
+            ("Security Floor", "header"),
+            ("approved-posture", "approved posture field"),
+            ("managed-policy", "managed policy field"),
+            ("Runtime Overrides", "runtime overrides header"),
+            ("Active Unlocks", "active unlocks header"),
+        ]:
+            require_contains(status_human, needle, f"install/security status human {context}")
+
+        global_status_result = run_command_result(
+            "install/security status global json",
+            status_fixture,
+            [str(LPM_BIN), "--json", "security", "status", "--global"],
+            extra_env=scenario_env,
+        )
+        global_status = require_success_payload(
+            "install/security status global json",
+            global_status_result,
+            "status",
+        )
+        if global_status.get("target") != "global":
+            raise SmokeFailure("install/security status global json: expected target=global")
+
+        override_status_result = run_command_result(
+            "install/security status env override json",
+            status_fixture,
+            [str(LPM_BIN), "--json", "security", "status", "--project", "."],
+            extra_env={**scenario_env, "LPM_PROVENANCE_ENFORCE": "warn"},
+        )
+        override_status = require_success_payload(
+            "install/security status env override json",
+            override_status_result,
+            "status",
+        )
+        runtime_overrides = override_status.get("active_runtime_overrides")
+        if not isinstance(runtime_overrides, list) or not any(
+            isinstance(row, dict)
+            and row.get("control") == "sigstore.verify"
+            and row.get("value") == "warn"
+            and row.get("source") == "LPM_PROVENANCE_ENFORCE"
+            for row in runtime_overrides
+        ):
+            raise SmokeFailure(
+                "install/security status env override json: expected sigstore override from LPM_PROVENANCE_ENFORCE"
+            )
+
+        config_fixture = reset_security_fixture("config")
+        config_commands = [
+            (
+                "install/security config scripts allow requires approval",
+                [str(LPM_BIN), "--json", "config", "scripts", "--set", "allow"],
+                "scripts-allow",
+            ),
+            (
+                "install/security config release-age zero requires approval",
+                [str(LPM_BIN), "--json", "config", "release-age", "--set", "0"],
+                "cooldown-bypass",
+            ),
+            (
+                "install/security config sandbox none requires approval",
+                [str(LPM_BIN), "--json", "config", "sandbox", "--set", "none"],
+                "sandbox-none",
+            ),
+            (
+                "install/security config sigstore off requires approval",
+                [str(LPM_BIN), "--json", "config", "sigstore", "--set", "off"],
+                "provenance-unverified",
+            ),
+        ]
+        for label, args, scope in config_commands:
+            result = run_command_result(label, config_fixture, args, extra_env=scenario_env)
+            require_security_approval_envelope(label, result, scope)
+
+        config_audit_rows = read_jsonl(audit_path)
+        for scope in [
+            "scripts-allow",
+            "cooldown-bypass",
+            "sandbox-none",
+            "provenance-unverified",
+        ]:
+            require_audit_event(
+                config_audit_rows,
+                event="persistent-guarded-attempt",
+                allowed=False,
+                expected_scope=scope,
+                context="install/security config audit",
+            )
+
+        proposal_fixture = reset_security_fixture("proposal")
+        write_registry_npmrc(proposal_fixture, registry.registry_url)
+        write_package_json(
+            proposal_fixture / "package.json",
+            {
+                "name": "security-proposal-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {package_name: version},
+                "lpm": {"minimumReleaseAge": 0},
+            },
+        )
+        proposal_result = run_command_result(
+            "install/security package proposal requires approval",
+            proposal_fixture,
+            [str(LPM_BIN), "--json", "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        proposal_envelope = require_security_approval_envelope(
+            "install/security package proposal requires approval",
+            proposal_result,
+            "cooldown-bypass",
+        )
+        if (
+            proposal_envelope.get("error", {}).get("suggested_command")
+            != "lpm security unlock cooldown-bypass --project . --ttl 10m"
+        ):
+            raise SmokeFailure(
+                "install/security package proposal suggested command: expected project unlock hint"
+            )
+        require_not_exists(proposal_fixture / "node_modules")
+
+        unlock_result = run_command_result(
+            "install/security unlock json refuses automation",
+            proposal_fixture,
+            [
+                str(LPM_BIN),
+                "--json",
+                "security",
+                "unlock",
+                "cooldown-bypass",
+                "--project",
+                ".",
+                "--ttl",
+                "10m",
+            ],
+            extra_env=scenario_env,
+        )
+        require_security_approval_envelope(
+            "install/security unlock json refuses automation",
+            unlock_result,
+            "cooldown-bypass",
+        )
+
+        proposal_audit_rows = read_jsonl(audit_path)
+        require_audit_event(
+            proposal_audit_rows,
+            event="guarded-attempt",
+            allowed=False,
+            expected_scope="cooldown-bypass",
+            context="install/security package proposal audit",
+        )
+
+        if os.environ.get(NATIVE_SECURITY_UNLOCK_ENV) == "1":
+            unlock_transcript = run_interactive_command(
+                "install/security unlock native approval",
+                proposal_fixture,
+                [
+                    str(LPM_BIN),
+                    "security",
+                    "unlock",
+                    "cooldown-bypass",
+                    "--project",
+                    ".",
+                    "--ttl",
+                    "10m",
+                ],
+                prompts=[],
+                extra_env=scenario_env,
+            )
+            require_contains(
+                unlock_transcript,
+                "Temporary project unlock for cooldown-bypass is active for 10 minutes.",
+                "install/security unlock native approval transcript",
+            )
+
+            unlocked_status_result = run_command_result(
+                "install/security status after native unlock",
+                proposal_fixture,
+                [str(LPM_BIN), "--json", "security", "status", "--project", "."],
+                extra_env=scenario_env,
+            )
+            unlocked_status = require_success_payload(
+                "install/security status after native unlock",
+                unlocked_status_result,
+                "status",
+            )
+            active_unlocks = unlocked_status.get("active_unlocks")
+            if not isinstance(active_unlocks, list) or not any(
+                isinstance(grant, dict)
+                and isinstance(grant.get("scopes"), list)
+                and "cooldown-bypass" in grant.get("scopes")
+                for grant in active_unlocks
+            ):
+                raise SmokeFailure(
+                    "install/security status after native unlock: expected active cooldown-bypass grant"
+                )
+
+            run_command(
+                "install/security package proposal succeeds after native unlock",
+                proposal_fixture,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=scenario_env,
+            )
+            if read_installed_package_version(proposal_fixture, package_name) != version:
+                raise SmokeFailure(
+                    "install/security package proposal succeeds after native unlock: expected installed package"
+                )
+
+            final_audit_rows = read_jsonl(audit_path)
+            require_audit_event(
+                final_audit_rows,
+                event="unlock-granted",
+                allowed=True,
+                expected_scope="cooldown-bypass",
+                context="install/security native unlock audit",
+            )
+        else:
+            log(
+                f"install/security native unlock: set {NATIVE_SECURITY_UNLOCK_ENV}=1 to exercise the macOS approval success path"
+            )
 
 
 def scenario_install_audit_after_install() -> None:
@@ -4358,44 +4868,38 @@ def scenario_install_approve_scripts_command() -> None:
             [str(LPM_BIN), "--json", "approve-scripts", "smoke-approve-scripted"],
             extra_env=scenario_env,
         )
-        if approve_result.returncode != 0:
-            raise SmokeFailure(
-                "install/approve-scripts named approve json failed with exit code "
-                f"{approve_result.returncode}"
-            )
-        approve_envelope = json.loads(approve_result.stdout)
-        if approve_envelope.get("approved_count") != 1:
-            raise SmokeFailure(
-                "install/approve-scripts named approve json: expected approved_count=1"
-            )
-
-        updated_package_json = (fixture / "package.json").read_text(encoding="utf-8")
-        require_contains(
-            updated_package_json,
-            '"smoke-approve-scripted@1.0.0"',
-            "install/approve-scripts package.json trustedDependencies",
+        approve_envelope = require_security_approval_envelope(
+            "install/approve-scripts named approve json",
+            approve_result,
+            "trust-bulk-approve",
         )
-        require_contains(
-            updated_package_json,
-            '"scriptHash"',
-            "install/approve-scripts package.json trustedDependencies",
-        )
+        if (
+            approve_envelope.get("error", {}).get("suggested_command")
+            != "lpm security unlock trust-bulk-approve --project . --ttl 10m"
+        ):
+            raise SmokeFailure(
+                "install/approve-scripts named approve json: expected project unlock hint"
+            )
+        if (fixture / "package.json").read_text(encoding="utf-8") != original_package_json:
+            raise SmokeFailure(
+                "install/approve-scripts named approve package.json: expected no mutation without approval"
+            )
 
         empty_list_result = run_command_result(
-            "install/approve-scripts list json after approval",
+            "install/approve-scripts list json after refused approval",
             fixture,
             [str(LPM_BIN), "--json", "approve-scripts", "--list"],
             extra_env=scenario_env,
         )
         if empty_list_result.returncode != 0:
             raise SmokeFailure(
-                "install/approve-scripts list json after approval failed with exit code "
+                "install/approve-scripts list json after refused approval failed with exit code "
                 f"{empty_list_result.returncode}"
             )
         empty_list_envelope = json.loads(empty_list_result.stdout)
-        if empty_list_envelope.get("blocked_count") != 0:
+        if empty_list_envelope.get("blocked_count") != 1:
             raise SmokeFailure(
-                "install/approve-scripts list json after approval: expected blocked_count=0"
+                "install/approve-scripts list json after refused approval: expected blocked_count=1"
             )
 
 
@@ -4471,19 +4975,67 @@ def scenario_install_trust_command() -> None:
             [str(LPM_BIN), "--json", "approve-scripts", scripted_package],
             extra_env=scenario_env,
         )
-        if approve_result.returncode != 0:
+        approve_envelope = require_security_approval_envelope(
+            "install/trust approve scripted package",
+            approve_result,
+            "trust-bulk-approve",
+        )
+        if (
+            approve_envelope.get("error", {}).get("suggested_command")
+            != "lpm security unlock trust-bulk-approve --project . --ttl 10m"
+        ):
             raise SmokeFailure(
-                "install/trust approve scripted package failed with exit code "
-                f"{approve_result.returncode}"
-            )
-        approve_envelope = json.loads(approve_result.stdout)
-        if approve_envelope.get("approved_count") != 1:
-            raise SmokeFailure(
-                "install/trust approve scripted package: expected approved_count=1"
+                "install/trust approve scripted package: expected project unlock hint"
             )
 
+        dry_run_result = run_command_result(
+            "install/trust named dry-run json",
+            fixture,
+            [
+                str(LPM_BIN),
+                "--json",
+                "approve-scripts",
+                scripted_package,
+                "--dry-run",
+            ],
+            extra_env=scenario_env,
+        )
+        if dry_run_result.returncode != 0:
+            raise SmokeFailure(
+                "install/trust named dry-run json failed with exit code "
+                f"{dry_run_result.returncode}"
+            )
+        dry_run_envelope = parse_json_stdout(
+            "install/trust named dry-run json",
+            dry_run_result,
+        )
+        approved = dry_run_envelope.get("approved")
+        if not isinstance(approved, list) or len(approved) != 1:
+            raise SmokeFailure(
+                "install/trust named dry-run json: expected one approved entry"
+            )
+        approved_entry = approved[0]
+        if not isinstance(approved_entry, dict):
+            raise SmokeFailure(
+                "install/trust named dry-run json: expected approved entry object"
+            )
+
+        package_json = read_json_file(fixture / "package.json")
+        lpm_block = package_json.setdefault("lpm", {})
+        if not isinstance(lpm_block, dict):
+            raise SmokeFailure(
+                "install/trust package.json baseline: expected lpm block to be an object"
+            )
+        lpm_block["trustedDependencies"] = {
+            f"{scripted_package}@{version}": {
+                "integrity": approved_entry.get("integrity"),
+                "scriptHash": approved_entry.get("script_hash"),
+            }
+        }
+        write_package_json(fixture / "package.json", package_json)
+
         diff_result = run_command_result(
-            "install/trust diff json after approval",
+            "install/trust diff json after direct trust drift",
             fixture,
             [str(LPM_BIN), "trust", "diff", "--json"],
             extra_env=scenario_env,
@@ -4496,11 +5048,11 @@ def scenario_install_trust_command() -> None:
         added = diff_envelope.get("added", [])
         if len(added) != 1 or added[0].get("key") != f"{scripted_package}@{version}":
             raise SmokeFailure(
-                "install/trust diff json: expected one added trust binding for the approved package"
+                "install/trust diff json: expected one added trust binding after direct manifest drift"
             )
 
         diff_assert_output = run_command_expect_failure(
-            "install/trust diff assert-none after approval",
+            "install/trust diff assert-none after direct trust drift",
             fixture,
             [str(LPM_BIN), "trust", "diff", "--assert-none"],
             extra_env=scenario_env,
@@ -4641,72 +5193,38 @@ def scenario_install_rebuild_command() -> None:
             [str(LPM_BIN), "--json", "approve-scripts", package_name],
             extra_env=scenario_env,
         )
-        if approve_result.returncode != 0:
-            raise SmokeFailure(
-                "install/rebuild approve scripted package failed with exit code "
-                f"{approve_result.returncode}"
-            )
-
-        dry_run_result = run_command_result(
-            "install/rebuild dry-run json",
-            fixture,
-            [str(LPM_BIN), "--json", "rebuild", package_name, "--dry-run"],
-            extra_env=scenario_env,
+        approve_envelope = require_security_approval_envelope(
+            "install/rebuild approve scripted package",
+            approve_result,
+            "trust-bulk-approve",
         )
-        if dry_run_result.returncode != 0:
+        if (
+            approve_envelope.get("error", {}).get("suggested_command")
+            != "lpm security unlock trust-bulk-approve --project . --ttl 10m"
+        ):
             raise SmokeFailure(
-                f"install/rebuild dry-run json failed with exit code {dry_run_result.returncode}"
-            )
-        dry_run_envelope = json.loads(dry_run_result.stdout)
-        packages = dry_run_envelope.get("packages", [])
-        if dry_run_envelope.get("dry_run") is not True:
-            raise SmokeFailure("install/rebuild dry-run json: expected dry_run=true")
-        if len(packages) != 1 or packages[0].get("name") != package_name:
-            raise SmokeFailure(
-                "install/rebuild dry-run json: expected exactly one named package in packages[]"
-            )
-        if packages[0].get("trusted") is not True:
-            raise SmokeFailure(
-                "install/rebuild dry-run json: expected trusted=true after approval"
+                "install/rebuild approve scripted package: expected project unlock hint"
             )
 
-        run_command(
-            "install/rebuild live rebuild",
+        deny_output = run_command(
+            "install/rebuild deny-mode no trusted packages",
             fixture,
-            [str(LPM_BIN), "rebuild", package_name],
-            extra_env=scenario_env,
-        )
-        require_exists(build_count_path)
-        if build_count_path.read_text(encoding="utf-8").strip() != "1":
-            raise SmokeFailure(
-                "install/rebuild live rebuild: expected build-count.txt to be 1 after first rebuild"
-            )
-
-        already_built_output = run_command(
-            "install/rebuild second rebuild without force",
-            fixture,
-            [str(LPM_BIN), "rebuild", package_name],
+            [str(LPM_BIN), "rebuild"],
             extra_env=scenario_env,
         )
         require_contains(
-            already_built_output,
-            "already built",
-            "install/rebuild second rebuild output",
+            deny_output,
+            "trustedDependencies",
+            "install/rebuild deny-mode output",
         )
-        if build_count_path.read_text(encoding="utf-8").strip() != "1":
-            raise SmokeFailure(
-                "install/rebuild second rebuild without force: expected build-count.txt to stay 1"
-            )
-
-        run_command(
-            "install/rebuild force rebuild",
-            fixture,
-            [str(LPM_BIN), "rebuild", package_name, "--force"],
-            extra_env=scenario_env,
+        require_not_contains(
+            deny_output,
+            "approve-scripts",
+            "install/rebuild deny-mode output",
         )
-        if build_count_path.read_text(encoding="utf-8").strip() != "2":
+        if build_count_path.exists():
             raise SmokeFailure(
-                "install/rebuild force rebuild: expected build-count.txt to advance to 2"
+                "install/rebuild deny-mode no trusted packages: expected build-count.txt to stay absent"
             )
 
 
@@ -6631,7 +7149,7 @@ def scenario_install_dev_command() -> None:
             "install/dev env validation required var",
         )
         require_contains(
-            validation_output,
+            validation_output.lower(),
             "created from .env.example",
             "install/dev env bootstrap status",
         )
@@ -7000,12 +7518,12 @@ def scenario_install_dev_command() -> None:
             tunnel_output = tunnel_stdout + tunnel_stderr
             require_contains(
                 tunnel_output,
-                f"Inspect  http://127.0.0.1:{tunnel_inspect_port}/?token=",
+                f"Inspect http://127.0.0.1:{tunnel_inspect_port}/?token=",
                 "install/dev tunnel inspect-port banner",
             )
             require_contains(
                 tunnel_output,
-                f"Tunnel: https://dev-smoke.lpm.fyi → localhost:{tunnel_dev_port}",
+                f"Tunnel https://dev-smoke.lpm.fyi → localhost:{tunnel_dev_port}",
                 "install/dev tunnel success banner",
             )
             require_contains(
@@ -7136,7 +7654,7 @@ def scenario_install_dev_command() -> None:
             tunnel_auth_output = tunnel_auth_stdout + tunnel_auth_stderr
             require_contains(
                 tunnel_auth_output,
-                f"Tunnel: https://private-smoke.lpm.llc → localhost:{tunnel_auth_dev_port}",
+                f"Tunnel https://private-smoke.lpm.llc → localhost:{tunnel_auth_dev_port}",
                 "install/dev tunnel-auth success banner",
             )
             require_exists(tunnel_auth_capture_path)
@@ -7270,7 +7788,7 @@ def scenario_install_dev_command() -> None:
             )
             require_exists(tunnel_no_inspect_capture_path)
             if (
-                f"Inspect  http://127.0.0.1:{tunnel_no_inspect_port}/?token="
+                f"Inspect http://127.0.0.1:{tunnel_no_inspect_port}/?token="
                 in no_inspect_output
             ):
                 raise SmokeFailure(
@@ -8832,11 +9350,11 @@ def scenario_install_global_install() -> None:
 
 SCENARIOS = {
     "install-trust": (
-        "Run lpm trust coverage for diff drift gating plus prune dry-run and live stale-entry cleanup.",
+        "Run lpm trust coverage for guarded approval refusal plus diff/prune behavior over direct manifest-and-snapshot drift.",
         scenario_install_trust_command,
     ),
     "install-rebuild": (
-        "Run lpm rebuild coverage for named dry-run selection, live execution, already-built skip, and --force reruns.",
+        "Run lpm rebuild coverage for guarded trust approval refusal plus deny-mode skip messaging with no script execution.",
         scenario_install_rebuild_command,
     ),
     "install-patch": (
@@ -8940,8 +9458,12 @@ SCENARIOS = {
         scenario_install_query_command,
     ),
     "install-approve-scripts": (
-        "Run lpm approve-scripts coverage for blocked-set listing, dry-run preview, and live named approval writes.",
+        "Run lpm approve-scripts coverage for blocked-set listing, dry-run preview, and guarded named approval refusal.",
         scenario_install_approve_scripts_command,
+    ),
+    "install-security": (
+        "Run lpm security coverage for status output, guarded config writes, guarded repo proposals, audit records, and optional native unlock success.",
+        scenario_install_security,
     ),
     "install-read-only-routing": (
         "Run info, resolve, search, and download against a project-local .npmrc registry without the proxy metadata path.",
@@ -8972,7 +9494,7 @@ SCENARIOS = {
         scenario_install_audit_after_install,
     ),
     "install-minimum-release-age": (
-        "Run recent-publish cooldown coverage for default block, CLI bypasses, and explicit pins.",
+        "Run recent-publish cooldown coverage for default blocking, guarded CLI and package weakeners, and explicit pins.",
         scenario_install_minimum_release_age,
     ),
     "install-offline-integrity": (
@@ -8980,7 +9502,7 @@ SCENARIOS = {
         scenario_install_offline_integrity,
     ),
     "install-script-policy": (
-        "Run default-deny and triage green-or-blocked lifecycle script checks.",
+        "Run default-deny lifecycle-script coverage plus guarded allow and triage manifest proposals.",
         scenario_install_script_policy,
     ),
     "install-save-policy": (
@@ -9069,7 +9591,8 @@ def main() -> int:
     for name in selected:
         description, scenario = SCENARIOS[name]
         log(f"starting {name}: {description}")
-        scenario()
+        with isolated_default_smoke_home():
+            scenario()
         log(f"finished {name}")
 
     log("all requested scenarios passed")

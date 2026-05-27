@@ -1,19 +1,8 @@
 {
-  "name": "rebuild-command-smoke",
-  "private": true,
-  "version": "0.0.0",
-  "dependencies": {
-    "smoke-rebuild-scripted": "^1.0.0"
-  },
-  "lpm": {
-    "trustedDependencies": {
-      "smoke-rebuild-scripted@1.0.0": {
-        "integrity": "sha512-I6LsDvTFFdZzmQ+WHfNWKrYTsKEbNAlIf8Uv+Cay4/7V2+wQiKRHeQ8rWZSn9K244sBmPp9TqqmaD7D1fms1ZQ==",
-        "scriptHash": "sha256-99bab5b256ce9395f12bc9ee68ef7fc3cff4dce3a9f1804402dcec05026a8a65",
-        "provenanceAtApproval": {
-          "present": false
-        }
-      }
+    "name": "rebuild-command-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-rebuild-scripted": "^1.0.0"
     }
-  }
 }

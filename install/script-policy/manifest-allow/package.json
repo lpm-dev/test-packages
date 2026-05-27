@@ -1,0 +1,11 @@
+{
+    "name": "script-policy-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-script-green": "^1.0.0"
+    },
+    "lpm": {
+        "scriptPolicy": "allow"
+    }
+}

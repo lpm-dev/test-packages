@@ -9,6 +9,11 @@ Use `python3 run_smokes.py --list` to see the available scenarios.
 Use `python3 run_smokes.py all` to rebuild `lpm-rs`, reset the relevant fixtures,
 and run the current live smoke suite end to end.
 
+Use `LPM_SMOKE_NATIVE_SECURITY_UNLOCK=1 python3 run_smokes.py install-security`
+to opt into the native macOS approval dialog path for `lpm security unlock`.
+Without that env var, the security smoke only covers the automatable refusal and
+status/config/proposal surfaces.
+
 The runner is Python on purpose: it uses the standard-library PTY support to
 drive real interactive `lpm add` prompts without adding project dependencies.
 
@@ -57,15 +62,16 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/project-discovery` — new fixture set for nearest-ancestor root discovery and fresh-directory auto-manifest coverage
 - `install/engines` — new fixture set for `engines.lpm` enforcement and opt-out behavior
 - `install/save-policy` — mock-registry fixture set for save-prefix, explicit range, latest-tag, prerelease, wildcard, and re-install coverage
-- `install/script-policy` — mock-registry fixture set for default deny, triage green auto-build, and triage amber blocked lifecycle-script coverage
+- `install/script-policy` — mock-registry fixture set for default deny plus guarded `lpm.scriptPolicy = "allow"` and `"triage"` manifest proposal coverage
 - `install/offline-integrity` — tarball-URL fixture set for `--strict-integrity`, warm-store offline relink, and cold offline failure coverage
-- `install/minimum-release-age` — mock-registry fixture set for recent-publish cooldown defaults, CLI bypasses, and explicit pinned-spec blocking
+- `install/minimum-release-age` — mock-registry fixture set for recent-publish cooldown defaults, guarded CLI/package weakeners, and explicit pinned-spec blocking
+- `install/security` — local + mock-registry fixture set for `lpm security status`, guarded `lpm config` writes, guarded repo proposals, signed audit-log coverage, and the optional native unlock success path
 - `install/audit-after-install` — mock-registry fixture set for default-off audit summaries, precedence resolution, JSON envelopes, and informational audit-hook failures
 - `install/audit` — mock-registry fixture for direct `lpm audit` runs, covering default informational high behaviors, `--fail-on=behavior`, and `--secrets --fail-on=secrets`
 - `install/query` — mock-registry fixture for direct `lpm query` runs, covering selector matches, `--assert-none`, `--count --json`, and Mermaid output
-- `install/approve-scripts` — mock-registry fixture for direct `lpm approve-scripts` runs, covering blocked-set listing, dry-run named approval, and live trust binding writes
-- `install/trust` — mock-registry fixture for direct `lpm trust` runs, covering snapshot drift after approval plus dry-run and live stale-entry pruning
-- `install/rebuild` — mock-registry fixture for direct `lpm rebuild` runs, covering named dry-run selection, real execution, already-built skips, and `--force` reruns
+- `install/approve-scripts` — mock-registry fixture for direct `lpm approve-scripts` runs, covering blocked-set listing, dry-run named approval preview, and guarded named approval refusal
+- `install/trust` — mock-registry fixture for direct `lpm trust` runs, covering guarded approval refusal plus diff/prune behavior over direct manifest-and-snapshot drift
+- `install/rebuild` — mock-registry fixture for direct `lpm rebuild` runs, covering guarded trust approval refusal plus deny-mode skip messaging with no script execution
 - `install/patch` — mock-registry fixture for direct `lpm patch` and `lpm patch-commit` runs, covering lockfile-based extraction, patch file generation, manifest registration, reinstall auto-apply, pristine re-extracts, and no-change aborts
 - `install/patch/scoped` — mock-registry fixture for scoped `lpm patch` and `lpm patch-commit` runs, covering `/` to `__` filename sanitization, manifest key preservation, and reinstall auto-apply through the sanitized patch path
 - `install/patch/binary` — mock-registry fixture for `lpm patch-commit` rejection of binary edits, covering the error path plus the absence of generated patch files or manifest mutation after the failed commit

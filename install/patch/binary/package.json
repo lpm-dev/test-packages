@@ -1,8 +1,8 @@
 {
-  "name": "patch-binary-command-smoke",
-  "private": true,
-  "version": "0.0.0",
-  "dependencies": {
-    "smoke-patch-binary-lib": "^1.0.0"
-  }
+    "name": "patch-binary-command-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-patch-binary-lib": "^1.0.0"
+    }
 }
