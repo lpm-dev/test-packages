@@ -65,7 +65,7 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/script-policy` — mock-registry fixture set for default deny plus guarded `lpm.scriptPolicy = "allow"` and `"triage"` manifest proposal coverage
 - `install/offline-integrity` — tarball-URL fixture set for `--strict-integrity`, warm-store offline relink, and cold offline failure coverage
 - `install/minimum-release-age` — mock-registry fixture set for recent-publish cooldown defaults, guarded CLI/package weakeners, and explicit pinned-spec blocking
-- `install/security` — local + mock-registry fixture set for `lpm security status`, guarded `lpm config` writes, guarded repo proposals, signed audit-log coverage, and the optional native unlock success path
+- `install/security` — local + mock-registry fixture set for `lpm security status`, guarded `lpm config` writes, guarded repo proposals, default-target `unlock` / `lock` coverage, signed audit-log coverage, and the optional native unlock + project lock success path
 - `install/audit-after-install` — mock-registry fixture set for default-off audit summaries, precedence resolution, JSON envelopes, and informational audit-hook failures
 - `install/audit` — mock-registry fixture for direct `lpm audit` runs, covering default informational high behaviors, `--fail-on=behavior`, and `--secrets --fail-on=secrets`
 - `install/query` — mock-registry fixture for direct `lpm query` runs, covering selector matches, `--assert-none`, `--count --json`, and Mermaid output
