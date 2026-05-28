@@ -4028,7 +4028,7 @@ def scenario_install_security() -> None:
         status_result = run_command_result(
             "install/security status project json",
             status_fixture,
-            [str(LPM_BIN), "--json", "security", "status", "--project", "."],
+            [str(LPM_BIN), "--json", "security", "status"],
             extra_env=scenario_env,
         )
         status = require_success_payload(
@@ -4096,6 +4096,27 @@ def scenario_install_security() -> None:
         )
         if global_status.get("target") != "global":
             raise SmokeFailure("install/security status global json: expected target=global")
+
+        default_lock_result = run_command_result(
+            "install/security lock default json",
+            status_fixture,
+            [str(LPM_BIN), "--json", "security", "lock", "default"],
+            extra_env=scenario_env,
+        )
+        default_lock = parse_json_stdout(
+            "install/security lock default json",
+            default_lock_result,
+        )
+        if default_lock_result.returncode != 0:
+            raise SmokeFailure("install/security lock default json: expected success exit code")
+        if default_lock.get("success") is not True:
+            raise SmokeFailure("install/security lock default json: expected success=true")
+        if default_lock.get("target") != "global":
+            raise SmokeFailure("install/security lock default json: expected target=global")
+        if default_lock.get("scope") != "default":
+            raise SmokeFailure("install/security lock default json: expected scope=default")
+        if default_lock.get("revocations") != []:
+            raise SmokeFailure("install/security lock default json: expected empty revocations")
 
         override_status_result = run_command_result(
             "install/security status env override json",
@@ -4216,6 +4237,51 @@ def scenario_install_security() -> None:
             "cooldown-bypass",
         )
 
+        default_unlock_result = run_command_result(
+            "install/security unlock default json refuses automation",
+            proposal_fixture,
+            [
+                str(LPM_BIN),
+                "--json",
+                "security",
+                "unlock",
+                "default",
+                "--ttl",
+                "365d",
+            ],
+            extra_env=scenario_env,
+        )
+        default_unlock_envelope = parse_json_stdout(
+            "install/security unlock default json refuses automation",
+            default_unlock_result,
+        )
+        if default_unlock_result.returncode == 0:
+            raise SmokeFailure(
+                "install/security unlock default json refuses automation: unexpectedly succeeded"
+            )
+        if default_unlock_envelope.get("success") is not False:
+            raise SmokeFailure(
+                "install/security unlock default json refuses automation: expected success=false envelope"
+            )
+        error = default_unlock_envelope.get("error")
+        if not isinstance(error, dict):
+            raise SmokeFailure(
+                "install/security unlock default json refuses automation: expected error object"
+            )
+        if error.get("code") != "SECURITY_APPROVAL_REQUIRED":
+            raise SmokeFailure(
+                "install/security unlock default json refuses automation: expected SECURITY_APPROVAL_REQUIRED"
+            )
+        requested_scopes = error.get("requested_scopes")
+        if not isinstance(requested_scopes, list) or "cooldown-bypass" not in requested_scopes:
+            raise SmokeFailure(
+                "install/security unlock default json refuses automation: expected default bundle requested scopes"
+            )
+        if error.get("suggested_command") != "lpm security unlock default --global --ttl 10m":
+            raise SmokeFailure(
+                "install/security unlock default json refuses automation: expected global suggested command for default selector"
+            )
+
         proposal_audit_rows = read_jsonl(audit_path)
         require_audit_event(
             proposal_audit_rows,
@@ -4281,6 +4347,73 @@ def scenario_install_security() -> None:
                     "install/security package proposal succeeds after native unlock: expected installed package"
                 )
 
+            lock_result = run_command_result(
+                "install/security lock project after native unlock",
+                proposal_fixture,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "security",
+                    "lock",
+                    "cooldown-bypass",
+                    "--project",
+                    ".",
+                ],
+                extra_env=scenario_env,
+            )
+            lock_envelope = parse_json_stdout(
+                "install/security lock project after native unlock",
+                lock_result,
+            )
+            if lock_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/security lock project after native unlock: expected success exit code"
+                )
+            if lock_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/security lock project after native unlock: expected success=true"
+                )
+            if lock_envelope.get("target") != "project":
+                raise SmokeFailure(
+                    "install/security lock project after native unlock: expected target=project"
+                )
+            revocations = lock_envelope.get("revocations")
+            if not isinstance(revocations, list) or not revocations:
+                raise SmokeFailure(
+                    "install/security lock project after native unlock: expected one revocation"
+                )
+            revoked = revocations[0]
+            if not isinstance(revoked, dict) or revoked.get("revoked_scopes") != ["cooldown-bypass"]:
+                raise SmokeFailure(
+                    "install/security lock project after native unlock: expected cooldown-bypass revocation"
+                )
+
+            locked_status_result = run_command_result(
+                "install/security status after project lock",
+                proposal_fixture,
+                [str(LPM_BIN), "--json", "security", "status", "--project", "."],
+                extra_env=scenario_env,
+            )
+            locked_status = require_success_payload(
+                "install/security status after project lock",
+                locked_status_result,
+                "status",
+            )
+            active_unlocks = locked_status.get("active_unlocks")
+            if not isinstance(active_unlocks, list):
+                raise SmokeFailure(
+                    "install/security status after project lock: expected active_unlocks list"
+                )
+            if any(
+                isinstance(grant, dict)
+                and isinstance(grant.get("scopes"), list)
+                and "cooldown-bypass" in grant.get("scopes")
+                for grant in active_unlocks
+            ):
+                raise SmokeFailure(
+                    "install/security status after project lock: expected cooldown-bypass grant to be removed"
+                )
+
             final_audit_rows = read_jsonl(audit_path)
             require_audit_event(
                 final_audit_rows,
@@ -4288,6 +4421,13 @@ def scenario_install_security() -> None:
                 allowed=True,
                 expected_scope="cooldown-bypass",
                 context="install/security native unlock audit",
+            )
+            require_audit_event(
+                final_audit_rows,
+                event="unlock-revoked",
+                allowed=True,
+                expected_scope="cooldown-bypass",
+                context="install/security native lock audit",
             )
         else:
             log(
