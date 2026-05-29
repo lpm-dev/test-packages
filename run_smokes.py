@@ -10685,6 +10685,439 @@ def scenario_install_auth_commands() -> None:
             )
 
 
+def scenario_install_bun_runtime() -> None:
+    minimal_shell_path = os.pathsep.join(["/usr/bin", "/bin", "/usr/sbin", "/sbin"])
+
+    def write_package(
+        project_path: Path,
+        *,
+        package_name: str,
+        scripts: dict[str, str] | None = None,
+        engines: dict[str, str] | None = None,
+    ) -> None:
+        package_json: dict[str, object] = {
+            "name": package_name,
+            "version": "1.0.0",
+            "private": True,
+        }
+        if scripts:
+            package_json["scripts"] = scripts
+        if engines:
+            package_json["engines"] = engines
+        project_path.joinpath("package.json").write_text(
+            json.dumps(package_json) + "\n", encoding="utf-8"
+        )
+
+    def seed_path_executable(
+        bin_dir: Path,
+        name: str,
+        output: str,
+        *,
+        log_path: Path | None = None,
+    ) -> None:
+        lines = ["#!/bin/sh"]
+        if log_path is not None:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            lines.append(f"printf '%s\\n' {json.dumps(name)} >> {json.dumps(str(log_path))}")
+        lines.append(f"printf '%s\\n' {json.dumps(output)}")
+        write_executable(bin_dir / name, "\n".join(lines) + "\n")
+
+    def managed_runtime_bin(home: str, runtime: str, version: str) -> Path:
+        return Path(home) / "runtimes" / runtime / version / "bin"
+
+    def seed_managed_runtime_executable(
+        home: str,
+        runtime: str,
+        version: str,
+        name: str,
+        output: str,
+        *,
+        log_path: Path | None = None,
+    ) -> None:
+        seed_path_executable(
+            managed_runtime_bin(home, runtime, version),
+            name,
+            output,
+            log_path=log_path,
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-bun-use-home-") as lpm_home, tempfile.TemporaryDirectory(
+        prefix="lpm-bun-use-project-"
+    ) as project_dir:
+        project_path = Path(project_dir)
+        write_package(project_path, package_name="bun-use-smoke")
+        seed_managed_runtime_executable(lpm_home, "bun", "1.3.14", "bun", "managed-bun-1.3.14")
+        seed_managed_runtime_executable(lpm_home, "bun", "1.3.9", "bun", "managed-bun-1.3.9")
+        seed_managed_runtime_executable(lpm_home, "bun", "1.2.23", "bun", "managed-bun-1.2.23")
+
+        use_env = {"LPM_HOME": lpm_home, "PATH": minimal_shell_path}
+
+        list_result = run_command_result(
+            "install/bun-runtime use list bun json",
+            project_path,
+            [str(LPM_BIN), "--json", "use", "--list", "bun"],
+            extra_env=use_env,
+        )
+        if list_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/bun-runtime use list bun json failed with exit code {list_result.returncode}"
+            )
+        list_envelope = json.loads(list_result.stdout)
+        if list_envelope.get("success") is not True:
+            raise SmokeFailure("install/bun-runtime use list bun json: expected success=true")
+        if list_envelope.get("runtime") != "bun":
+            raise SmokeFailure("install/bun-runtime use list bun json: expected runtime=bun")
+        if list_envelope.get("versions") != ["1.3.14", "1.3.9", "1.2.23"]:
+            raise SmokeFailure(
+                "install/bun-runtime use list bun json: expected descending managed Bun versions"
+            )
+
+        pin_result = run_command_result(
+            "install/bun-runtime use pin bun major-minor",
+            project_path,
+            [str(LPM_BIN), "use", "bun@1.3", "--pin"],
+            extra_env=use_env,
+        )
+        if pin_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/bun-runtime use pin bun major-minor failed with exit code {pin_result.returncode}"
+            )
+        require_contains(
+            pin_result.stderr,
+            "Pinned bun@1.3.14 in lpm.json",
+            "install/bun-runtime use pin bun major-minor stderr",
+        )
+        pinned_lpm_json = json.loads(project_path.joinpath("lpm.json").read_text(encoding="utf-8"))
+        if pinned_lpm_json.get("runtime", {}).get("bun") != "1.3.14":
+            raise SmokeFailure(
+                "install/bun-runtime use pin bun major-minor: expected lpm.json runtime.bun=1.3.14"
+            )
+
+        lts_output = run_command_expect_failure(
+            "install/bun-runtime use bun lts rejected",
+            project_path,
+            [str(LPM_BIN), "use", "bun@lts", "--pin"],
+            extra_env=use_env,
+        )
+        require_contains(
+            lts_output,
+            "Bun does not publish an LTS channel",
+            "install/bun-runtime use bun lts rejected",
+        )
+
+        remove_result = run_command_result(
+            "install/bun-runtime use remove bun major-minor",
+            project_path,
+            [str(LPM_BIN), "use", "remove", "bun@1.3"],
+            extra_env=use_env,
+        )
+        if remove_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/bun-runtime use remove bun major-minor failed with exit code {remove_result.returncode}"
+            )
+        require_contains(
+            remove_result.stderr,
+            "Removed 2 Bun versions",
+            "install/bun-runtime use remove bun major-minor stderr",
+        )
+        require_contains(
+            remove_result.stderr,
+            "lpm.json still pins bun@1.3.14",
+            "install/bun-runtime use remove bun major-minor pin warning",
+        )
+        if managed_runtime_bin(lpm_home, "bun", "1.3.14").parent.exists():
+            raise SmokeFailure(
+                "install/bun-runtime use remove bun major-minor: expected 1.3.14 managed Bun to be removed"
+            )
+        if managed_runtime_bin(lpm_home, "bun", "1.3.9").parent.exists():
+            raise SmokeFailure(
+                "install/bun-runtime use remove bun major-minor: expected 1.3.9 managed Bun to be removed"
+            )
+        if not managed_runtime_bin(lpm_home, "bun", "1.2.23").parent.exists():
+            raise SmokeFailure(
+                "install/bun-runtime use remove bun major-minor: expected 1.2.23 managed Bun to remain installed"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-bun-engines-home-") as lpm_home, tempfile.TemporaryDirectory(
+        prefix="lpm-bun-engines-project-"
+    ) as project_dir, tempfile.TemporaryDirectory(prefix="lpm-bun-engines-path-") as system_bin_dir:
+        project_path = Path(project_dir)
+        system_bin = Path(system_bin_dir)
+        write_package(
+            project_path,
+            package_name="bun-engines-smoke",
+            scripts={"show-bun": "bun"},
+            engines={"bun": ">=1.0.0"},
+        )
+        seed_managed_runtime_executable(
+            lpm_home,
+            "bun",
+            "1.3.14",
+            "bun",
+            "managed-bun-from-lpm-json-only",
+        )
+        seed_path_executable(system_bin, "bun", "system-bun-from-path")
+
+        engines_env = {
+            "LPM_HOME": lpm_home,
+            "PATH": os.pathsep.join([str(system_bin), minimal_shell_path]),
+        }
+
+        engines_run = run_command_result(
+            "install/bun-runtime engines bun ignored run",
+            project_path,
+            [str(LPM_BIN), "run", "show-bun"],
+            extra_env=engines_env,
+        )
+        if engines_run.returncode != 0:
+            raise SmokeFailure(
+                f"install/bun-runtime engines bun ignored run failed with exit code {engines_run.returncode}"
+            )
+        require_contains(
+            engines_run.stdout,
+            "system-bun-from-path",
+            "install/bun-runtime engines bun ignored stdout",
+        )
+        require_not_contains(
+            engines_run.stdout,
+            "managed-bun-from-lpm-json-only",
+            "install/bun-runtime engines bun ignored stdout",
+        )
+        require_not_contains(
+            engines_run.stderr,
+            "Using bun",
+            "install/bun-runtime engines bun ignored stderr",
+        )
+
+        with MockRegistry([]) as registry:
+            doctor_all = run_command_result(
+                "install/bun-runtime engines bun doctor all json",
+                project_path,
+                [
+                    str(LPM_BIN),
+                    "--registry",
+                    registry.registry_url,
+                    "--insecure",
+                    "doctor",
+                    "--all",
+                    "--json",
+                ],
+                extra_env=engines_env,
+            )
+            if doctor_all.returncode not in {0, 1}:
+                raise SmokeFailure(
+                    f"install/bun-runtime engines bun doctor all json failed with exit code {doctor_all.returncode}"
+                )
+            doctor_envelope = json.loads(doctor_all.stdout)
+            if doctor_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/bun-runtime engines bun doctor all json: expected success=true envelope"
+                )
+            all_codes = {check.get("code") for check in doctor_envelope.get("checks", [])}
+            if "engines_bun_ignored" not in all_codes:
+                raise SmokeFailure(
+                    "install/bun-runtime engines bun doctor all json: expected engines_bun_ignored"
+                )
+            for unexpected_code in {"bun_managed_match", "bun_pinned_unmet", "bun_missing_pinned"}:
+                if unexpected_code in all_codes:
+                    raise SmokeFailure(
+                        f"install/bun-runtime engines bun doctor all json: did not expect {unexpected_code} without runtime.bun"
+                    )
+            if registry.requested_paths() != ["/api/registry/health"]:
+                raise SmokeFailure(
+                    "install/bun-runtime engines bun doctor all json: expected only the health probe under --all"
+                )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-bun-managed-home-") as lpm_home, tempfile.TemporaryDirectory(
+        prefix="lpm-bun-managed-project-"
+    ) as project_dir:
+        project_path = Path(project_dir)
+        bun_invocation_log = Path(lpm_home) / "bun-invocations.log"
+        write_package(
+            project_path,
+            package_name="bun-managed-smoke",
+            scripts={
+                "show-order": "shared && node && bun",
+                "shell-runner": "printf 'runner-stays-shell\\n'",
+            },
+        )
+        project_path.joinpath("lpm.json").write_text(
+            json.dumps({"runtime": {"node": "22.12.0", "bun": "1.3.14"}}) + "\n",
+            encoding="utf-8",
+        )
+        seed_managed_runtime_executable(lpm_home, "node", "22.12.0", "node", "managed-node-22.12.0")
+        seed_managed_runtime_executable(lpm_home, "node", "22.12.0", "shared", "node-shared")
+        seed_managed_runtime_executable(
+            lpm_home,
+            "bun",
+            "1.3.14",
+            "bun",
+            "managed-bun-1.3.14",
+            log_path=bun_invocation_log,
+        )
+        seed_managed_runtime_executable(lpm_home, "bun", "1.3.14", "shared", "bun-shared")
+
+        managed_env = {"LPM_HOME": lpm_home, "PATH": minimal_shell_path}
+
+        show_order = run_command_result(
+            "install/bun-runtime managed path order run",
+            project_path,
+            [str(LPM_BIN), "run", "show-order"],
+            extra_env=managed_env,
+        )
+        if show_order.returncode != 0:
+            raise SmokeFailure(
+                f"install/bun-runtime managed path order run failed with exit code {show_order.returncode}"
+            )
+        show_order_lines = [line.strip() for line in show_order.stdout.splitlines() if line.strip()]
+        if show_order_lines != ["node-shared", "managed-node-22.12.0", "managed-bun-1.3.14"]:
+            raise SmokeFailure(
+                "install/bun-runtime managed path order run: expected node helper first, then managed node, then managed bun"
+            )
+        require_contains(
+            show_order.stderr,
+            "Using node 22.12.0",
+            "install/bun-runtime managed path order stderr",
+        )
+        require_contains(
+            show_order.stderr,
+            "Using bun 1.3.14",
+            "install/bun-runtime managed path order stderr",
+        )
+
+        doctor_fast = run_command_result(
+            "install/bun-runtime managed doctor fast json",
+            project_path,
+            [str(LPM_BIN), "doctor", "--json"],
+            extra_env=managed_env,
+        )
+        if doctor_fast.returncode not in {0, 1}:
+            raise SmokeFailure(
+                f"install/bun-runtime managed doctor fast json failed with exit code {doctor_fast.returncode}"
+            )
+        doctor_fast_envelope = json.loads(doctor_fast.stdout)
+        if doctor_fast_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/bun-runtime managed doctor fast json: expected success=true envelope"
+            )
+        doctor_fast_codes = {
+            check.get("code") for check in doctor_fast_envelope.get("checks", [])
+        }
+        if "bun_managed_match" not in doctor_fast_codes:
+            raise SmokeFailure(
+                "install/bun-runtime managed doctor fast json: expected bun_managed_match"
+            )
+        if "lpm_json_schema_warnings" in doctor_fast_codes:
+            raise SmokeFailure(
+                "install/bun-runtime managed doctor fast json: did not expect stale lpm.json runtime.bun schema warnings"
+            )
+
+        if bun_invocation_log.exists():
+            bun_invocations_before = bun_invocation_log.read_text(encoding="utf-8").splitlines()
+        else:
+            bun_invocations_before = []
+        if not bun_invocations_before:
+            raise SmokeFailure(
+                "install/bun-runtime managed path order run: expected at least one explicit bun invocation"
+            )
+
+        shell_runner = run_command_result(
+            "install/bun-runtime managed shell runner stays lpm",
+            project_path,
+            [str(LPM_BIN), "run", "shell-runner"],
+            extra_env=managed_env,
+        )
+        if shell_runner.returncode != 0:
+            raise SmokeFailure(
+                f"install/bun-runtime managed shell runner stays lpm failed with exit code {shell_runner.returncode}"
+            )
+        require_contains(
+            shell_runner.stdout,
+            "runner-stays-shell",
+            "install/bun-runtime managed shell runner stdout",
+        )
+        bun_invocations_after = bun_invocation_log.read_text(encoding="utf-8").splitlines()
+        if bun_invocations_after != bun_invocations_before:
+            raise SmokeFailure(
+                "install/bun-runtime managed shell runner: runtime.bun should not make lpm run invoke bun run"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-bun-noauto-home-") as lpm_home, tempfile.TemporaryDirectory(
+        prefix="lpm-bun-noauto-project-"
+    ) as project_dir, tempfile.TemporaryDirectory(prefix="lpm-bun-noauto-path-") as system_bin_dir:
+        project_path = Path(project_dir)
+        system_bin = Path(system_bin_dir)
+        write_package(
+            project_path,
+            package_name="bun-no-auto-smoke",
+            scripts={"show-bun": "bun"},
+        )
+        project_path.joinpath("lpm.json").write_text(
+            json.dumps({"runtime": {"bun": "1.3.14"}}) + "\n",
+            encoding="utf-8",
+        )
+        seed_path_executable(system_bin, "bun", "system-bun-fallback")
+
+        no_auto_env = {
+            "LPM_HOME": lpm_home,
+            "LPM_NO_AUTO_INSTALL": "true",
+            "PATH": os.pathsep.join([str(system_bin), minimal_shell_path]),
+        }
+
+        no_auto_run = run_command_result(
+            "install/bun-runtime no-auto-install fallback run",
+            project_path,
+            [str(LPM_BIN), "run", "show-bun"],
+            extra_env=no_auto_env,
+        )
+        if no_auto_run.returncode != 0:
+            raise SmokeFailure(
+                f"install/bun-runtime no-auto-install fallback run failed with exit code {no_auto_run.returncode}"
+            )
+        require_contains(
+            no_auto_run.stdout,
+            "system-bun-fallback",
+            "install/bun-runtime no-auto-install fallback stdout",
+        )
+        require_contains(
+            no_auto_run.stderr,
+            "lpm.json requires bun 1.3.14, but it's not installed. Using system bun.",
+            "install/bun-runtime no-auto-install fallback stderr",
+        )
+        require_contains(
+            no_auto_run.stderr,
+            "lpm use bun@1.3.14",
+            "install/bun-runtime no-auto-install fallback guidance",
+        )
+
+        no_auto_doctor = run_command_result(
+            "install/bun-runtime no-auto-install doctor fast json",
+            project_path,
+            [str(LPM_BIN), "doctor", "--json"],
+            extra_env=no_auto_env,
+        )
+        if no_auto_doctor.returncode not in {0, 1}:
+            raise SmokeFailure(
+                f"install/bun-runtime no-auto-install doctor fast json failed with exit code {no_auto_doctor.returncode}"
+            )
+        no_auto_envelope = json.loads(no_auto_doctor.stdout)
+        if no_auto_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/bun-runtime no-auto-install doctor fast json: expected success=true envelope"
+            )
+        no_auto_codes = {
+            check.get("code") for check in no_auto_envelope.get("checks", [])
+        }
+        if "bun_pinned_unmet" not in no_auto_codes:
+            raise SmokeFailure(
+                "install/bun-runtime no-auto-install doctor fast json: expected bun_pinned_unmet"
+            )
+        if "bun_managed_match" in no_auto_codes:
+            raise SmokeFailure(
+                "install/bun-runtime no-auto-install doctor fast json: did not expect bun_managed_match without a managed Bun install"
+            )
+
+
 def scenario_install_global_install() -> None:
     shared_bin = "smoke-global"
     alias_bin = "smoke-global-beta"
@@ -10929,6 +11362,10 @@ SCENARIOS = {
     "install-auth": (
         "Run third-party login fallback coverage plus missing-auth publish guidance for npm, GitHub Packages, and GitLab Packages.",
         scenario_install_auth_commands,
+    ),
+    "install-bun-runtime": (
+        "Run managed Bun runtime coverage for use/list/remove/pin, lpm.json-only Bun detection, PATH ordering after Node, doctor runtime codes, and LPM_NO_AUTO_INSTALL fallback semantics.",
+        scenario_install_bun_runtime,
     ),
     "install-migrate-npm": (
         "Run lpm migrate npm coverage for dry-run no-write behavior, non-destructive backup creation, default .npmrc setup, and rollback cleanup.",
