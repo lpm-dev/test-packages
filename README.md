@@ -61,6 +61,8 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/test-upstream-proxy` — migrated single-project fixture for mixed upstream-registry dependency coverage
 - `install/project-discovery` — new fixture set for nearest-ancestor root discovery and fresh-directory auto-manifest coverage
 - `install/engines` — new fixture set for `engines.lpm` enforcement and opt-out behavior
+- `install/peer-deps` — mock-registry fixture set for optional-peer suppression, strict missing-peer failures, structured `peer_issues`, and peer-conflict auto-isolation
+- `install/catalog` — mock-registry fixture set for manual/prefer/strict catalog save policy, `--catalog` forcing, package.json cleanup pruning, and `pnpm-workspace.yaml` catalog ingestion
 - `install/save-policy` — mock-registry fixture set for save-prefix, explicit range, latest-tag, prerelease, wildcard, and re-install coverage
 - `install/script-policy` — mock-registry fixture set for default deny plus guarded `lpm.scriptPolicy = "allow"` and `"triage"` manifest proposal coverage
 - `install/offline-integrity` — tarball-URL fixture set for `--strict-integrity`, warm-store offline relink, and cold offline failure coverage
@@ -79,5 +81,5 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `workspace/basic` — minimal workspace fixture with one local package and one app consuming it
 - `workspace/complex` — larger workspace fixture with multiple apps, shared packages, and transitive workspace links
 - `workspace/nested-boundary` — workspace fixture with a nested non-workspace child package for boundary regressions
-- `workspace/targeting` — workspace fixture for `--filter`, `-w`, multi-member writes, uninstall targeting, and `--fail-if-no-match`
+- `workspace/targeting` — workspace fixture for `--filter`, `--filter-prod`, `--no-bail`, `--workspace-concurrency`, `--changed-files-ignore-pattern`, `--test-pattern`, `pkg{path}`, `-w`, multi-member writes, uninstall targeting, and `--fail-if-no-match`
 - `workspace/pack` — workspace fixture for `lpm pack --all`, root-level tsdown bin reuse, workspace JSON envelopes, and multi-member watch rejection

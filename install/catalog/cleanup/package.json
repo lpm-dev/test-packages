@@ -1,0 +1,16 @@
+{
+  "name": "catalog-cleanup-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "is-positive": "catalog:"
+  },
+  "catalogs": {
+    "default": {
+      "is-positive": "^2.0.0"
+    }
+  },
+  "lpm": {
+    "cleanupUnusedCatalogs": true
+  }
+}

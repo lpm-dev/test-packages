@@ -1,7 +1,7 @@
 {
   "args": [
     "--port",
-    "51802",
+    "49324",
     "--capture",
     "https-success-capture.json"
   ],
@@ -12,7 +12,7 @@
     "STAGE_ONLY": null,
     "LOCAL_STAGE": null,
     "REQUIRED_TOKEN": null,
-    "NODE_EXTRA_CA_CERTS": "/var/folders/p2/32lgcl857ds0wkcnkg0qk51h0000gn/T/lpm-smoke-dev-https-success-3l7i3vij/.lpm/certs/rootCA.pem",
+    "NODE_EXTRA_CA_CERTS": "/var/folders/p2/32lgcl857ds0wkcnkg0qk51h0000gn/T/lpm-smoke-dev-https-success-hxl7dghu/.lpm/certs/rootCA.pem",
     "SSL_CERT_FILE": "/Users/tolga/Documents/Projects/lpm-dev/test-packages/install/dev/basic/.lpm/certs/cert.pem",
     "SSL_KEY_FILE": "/Users/tolga/Documents/Projects/lpm-dev/test-packages/install/dev/basic/.lpm/certs/key.pem"
   }

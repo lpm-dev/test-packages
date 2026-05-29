@@ -31,6 +31,7 @@ from urllib.request import urlopen
 ROOT = Path(__file__).resolve().parent
 RUST_CLIENT_ROOT = ROOT.parent / "rust-client"
 LPM_MANIFEST = RUST_CLIENT_ROOT / "Cargo.toml"
+WORKSPACE_TARGETING_FIXTURE = ROOT / "workspace" / "targeting"
 
 
 def resolve_cargo_target_dir() -> Path:
@@ -105,43 +106,21 @@ ENGINES_CONFIG_OPTOUT_BASELINE_PACKAGE_JSON = """{
 }
 """
 
-WORKSPACE_TARGETING_ROOT_BASELINE_PACKAGE_JSON = """{
-    \"name\": \"workspace-targeting-root\",
-    \"private\": true,
-    \"version\": \"0.0.0\",
-    \"workspaces\": [
-        \"apps/*\",
-        \"packages/*\"
-    ]
-}
-"""
+WORKSPACE_TARGETING_ROOT_BASELINE_PACKAGE_JSON = (
+    WORKSPACE_TARGETING_FIXTURE / "package.json"
+).read_text(encoding="utf-8")
 
-WORKSPACE_TARGETING_WEB_BASELINE_PACKAGE_JSON = """{
-    \"name\": \"@smoke/target-web\",
-    \"private\": true,
-    \"version\": \"0.0.0\",
-    \"dependencies\": {
-        \"@smoke/target-core\": \"workspace:*\"
-    }
-}
-"""
+WORKSPACE_TARGETING_WEB_BASELINE_PACKAGE_JSON = (
+    WORKSPACE_TARGETING_FIXTURE / "apps" / "web" / "package.json"
+).read_text(encoding="utf-8")
 
-WORKSPACE_TARGETING_DOCS_BASELINE_PACKAGE_JSON = """{
-    \"name\": \"@smoke/target-docs\",
-    \"private\": true,
-    \"version\": \"0.0.0\",
-    \"dependencies\": {
-        \"@smoke/target-core\": \"workspace:*\"
-    }
-}
-"""
+WORKSPACE_TARGETING_DOCS_BASELINE_PACKAGE_JSON = (
+    WORKSPACE_TARGETING_FIXTURE / "apps" / "docs" / "package.json"
+).read_text(encoding="utf-8")
 
-WORKSPACE_TARGETING_CORE_BASELINE_PACKAGE_JSON = """{
-    \"name\": \"@smoke/target-core\",
-    \"private\": true,
-    \"version\": \"0.0.0\"
-}
-"""
+WORKSPACE_TARGETING_CORE_BASELINE_PACKAGE_JSON = (
+    WORKSPACE_TARGETING_FIXTURE / "packages" / "core" / "package.json"
+).read_text(encoding="utf-8")
 
 SAVE_POLICY_DEFAULT_BASELINE_PACKAGE_JSON = """{
     \"name\": \"save-policy-default\",
@@ -159,6 +138,131 @@ SAVE_POLICY_EXISTING_RANGE_BASELINE_PACKAGE_JSON = """{
         \"smoke-save-lib\": \"~1.2.3\"
     }
 }
+"""
+
+PEER_DEPS_OPTIONAL_MISSING_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"peer-deps-optional-missing-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"dependencies\": {
+        \"optional-peer-host\": \"^1.0.0\"
+    }
+}
+"""
+
+PEER_DEPS_REQUIRED_MISSING_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"peer-deps-required-missing-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"dependencies\": {
+        \"required-peer-host\": \"^1.0.0\"
+    },
+    \"lpm\": {
+        \"autoInstallPeers\": false
+    }
+}
+"""
+
+PEER_DEPS_CONFLICT_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"peer-deps-conflict-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"dependencies\": {
+        \"peer-consumer-a\": \"^1.0.0\",
+        \"peer-consumer-b\": \"^1.0.0\"
+    }
+}
+"""
+
+CATALOG_MANUAL_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"catalog-manual-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"catalogs\": {
+        \"default\": {
+            \"is-positive\": \"^2.0.0\"
+        }
+    }
+}
+"""
+
+CATALOG_PREFER_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"catalog-prefer-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"catalogs\": {
+        \"default\": {
+            \"is-positive\": \"^2.0.0\"
+        }
+    },
+    \"lpm\": {
+        \"catalogMode\": \"prefer\"
+    }
+}
+"""
+
+CATALOG_STRICT_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"catalog-strict-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"catalogs\": {
+        \"default\": {
+            \"is-positive\": \"^1.0.0\"
+        }
+    },
+    \"lpm\": {
+        \"catalogMode\": \"strict\"
+    }
+}
+"""
+
+CATALOG_NAMED_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"catalog-named-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"catalogs\": {
+        \"testing\": {
+            \"is-positive\": \"^2.0.0\"
+        }
+    }
+}
+"""
+
+CATALOG_CLEANUP_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"catalog-cleanup-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"dependencies\": {
+        \"is-positive\": \"catalog:\"
+    },
+    \"catalogs\": {
+        \"default\": {
+            \"is-positive\": \"^2.0.0\",
+            \"unused-lib\": \"^9.9.9\"
+        }
+    },
+    \"lpm\": {
+        \"cleanupUnusedCatalogs\": true
+    }
+}
+"""
+
+CATALOG_PNPM_WORKSPACE_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"catalog-pnpm-workspace-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"dependencies\": {
+        \"is-positive\": \"catalog:\"
+    }
+}
+"""
+
+CATALOG_PNPM_WORKSPACE_BASELINE_YAML = """packages:
+  - \"packages/*\"
+catalog:
+  is-positive: ^2.0.0
+  unused-lib: ^9.9.9
+cleanupUnusedCatalogs: true
 """
 
 SCRIPT_POLICY_BASELINE_PACKAGE_JSON = """{
@@ -1449,8 +1553,58 @@ def reset_engines_fixture(name: str, package_json: str) -> Path:
     )
 
 
+def reset_peer_deps_fixture(name: str, package_json: str) -> Path:
+    fixture = ROOT / "install" / "peer-deps" / name
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={"package.json": package_json},
+        extra_delete=[".npmrc"],
+    )
+
+
+def reset_catalog_fixture(
+    name: str,
+    package_json: str,
+    *,
+    pnpm_workspace_yaml: str | None = None,
+) -> Path:
+    fixture = ROOT / "install" / "catalog" / name
+    baseline_files = {"package.json": package_json}
+    if pnpm_workspace_yaml is not None:
+        baseline_files["pnpm-workspace.yaml"] = pnpm_workspace_yaml
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files=baseline_files,
+        extra_delete=[".npmrc", "pnpm-workspace.yaml"],
+    )
+
+
 def reset_workspace_targeting_fixture() -> Path:
     fixture = reset_workspace_fixture("targeting")
+    for rel in [
+        ".git",
+        "record-concurrency.js",
+        "concurrency-state.json",
+        "concurrency-state.lock",
+        "lpm.toml",
+        "packages/project-1",
+        "packages/project-2",
+        "packages/project-3",
+        "packages/project-4",
+        "packages/no-bail-utils",
+        "packages/no-bail-core",
+        "packages/no-bail-app",
+        "packages/concurrency-alpha",
+        "packages/concurrency-beta",
+        "packages/concurrency-gamma",
+        "packages/changed-app",
+        "packages/test-pattern-utils",
+        "packages/test-pattern-app",
+        "apps/scope-web",
+        "packages/scope-ui",
+        "apps/other-admin",
+    ]:
+        delete_path(fixture / rel)
     (fixture / "package.json").write_text(
         WORKSPACE_TARGETING_ROOT_BASELINE_PACKAGE_JSON,
         encoding="utf-8",
@@ -1468,6 +1622,304 @@ def reset_workspace_targeting_fixture() -> Path:
         encoding="utf-8",
     )
     return fixture
+
+
+def run_git_command(label: str, cwd: Path, args: list[str]) -> str:
+    result = run_command_result(
+        label,
+        cwd,
+        ["git", *args],
+        extra_env={
+            "GIT_AUTHOR_NAME": "smoke",
+            "GIT_AUTHOR_EMAIL": "smoke@example.com",
+            "GIT_COMMITTER_NAME": "smoke",
+            "GIT_COMMITTER_EMAIL": "smoke@example.com",
+        },
+    )
+    combined = result.stdout + result.stderr
+    if result.returncode != 0:
+        raise SmokeFailure(f"{label} failed with exit code {result.returncode}")
+    return combined
+
+
+def seed_workspace_filter_prod_members(fixture: Path) -> None:
+    members = {
+        "project-1": {
+            "name": "project-1",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-2": "workspace:*",
+                "project-3": "workspace:*",
+            },
+            "scripts": {
+                "check": "node -e \"require('fs').writeFileSync('ran-project-1.txt','ok')\"",
+            },
+        },
+        "project-2": {
+            "name": "project-2",
+            "version": "1.0.0",
+            "scripts": {
+                "check": "node -e \"require('fs').writeFileSync('ran-project-2.txt','ok')\"",
+            },
+        },
+        "project-3": {
+            "name": "project-3",
+            "version": "1.0.0",
+            "dependencies": {
+                "project-2": "workspace:*",
+            },
+            "scripts": {
+                "check": "node -e \"require('fs').writeFileSync('ran-project-3.txt','ok')\"",
+            },
+        },
+        "project-4": {
+            "name": "project-4",
+            "version": "1.0.0",
+            "devDependencies": {
+                "project-3": "workspace:*",
+            },
+            "scripts": {
+                "check": "node -e \"require('fs').writeFileSync('ran-project-4.txt','ok')\"",
+            },
+        },
+    }
+
+    for member, manifest in members.items():
+        write_package_json(fixture / "packages" / member / "package.json", manifest)
+
+
+def seed_workspace_no_bail_members(fixture: Path) -> None:
+    members = {
+        "no-bail-utils": {
+            "name": "@smoke/no-bail-utils",
+            "version": "1.0.0",
+            "scripts": {
+                "check": "node -e \"require('fs').writeFileSync('ran-utils.txt','failed'); process.exit(1)\"",
+            },
+        },
+        "no-bail-core": {
+            "name": "@smoke/no-bail-core",
+            "version": "1.0.0",
+            "dependencies": {
+                "@smoke/no-bail-utils": "workspace:*",
+            },
+            "scripts": {
+                "check": "node -e \"require('fs').writeFileSync('ran-core.txt','ok')\"",
+            },
+        },
+        "no-bail-app": {
+            "name": "@smoke/no-bail-app",
+            "version": "1.0.0",
+            "dependencies": {
+                "@smoke/no-bail-core": "workspace:*",
+            },
+            "scripts": {
+                "check": "node -e \"require('fs').writeFileSync('ran-app.txt','ok')\"",
+            },
+        },
+    }
+
+    for member, manifest in members.items():
+        write_package_json(fixture / "packages" / member / "package.json", manifest)
+
+
+def seed_workspace_concurrency_members(fixture: Path) -> None:
+    (fixture / "record-concurrency.js").write_text(
+        """
+const fs = require('fs');
+const path = require('path');
+
+const root = __dirname;
+const statePath = path.join(root, 'concurrency-state.json');
+const lockPath = path.join(root, 'concurrency-state.lock');
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function acquireLock() {
+  const deadline = Date.now() + 10000;
+  while (true) {
+    try {
+      fs.mkdirSync(lockPath);
+      return;
+    } catch (error) {
+      if (error.code !== 'EEXIST' || Date.now() > deadline) {
+        throw error;
+      }
+    }
+  }
+}
+
+function withLock(callback) {
+  acquireLock();
+  try {
+    return callback();
+  } finally {
+    fs.rmSync(lockPath, { recursive: true, force: true });
+  }
+}
+
+function mutateActive(delta) {
+  withLock(() => {
+    let state = { active: 0, max: 0 };
+    try {
+      state = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+    } catch (error) {
+      if (error.code !== 'ENOENT') {
+        throw error;
+      }
+    }
+
+    state.active += delta;
+    if (state.active < 0) {
+      throw new Error('active counter went negative');
+    }
+    state.max = Math.max(state.max, state.active);
+    fs.writeFileSync(statePath, JSON.stringify(state));
+  });
+}
+
+(async () => {
+  mutateActive(1);
+  await sleep(250);
+  mutateActive(-1);
+})().catch(error => {
+  console.error(error);
+  process.exit(1);
+});
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+    for member in ["concurrency-alpha", "concurrency-beta", "concurrency-gamma"]:
+        write_package_json(
+            fixture / "packages" / member / "package.json",
+            {
+                "name": f"@smoke/{member}",
+                "version": "1.0.0",
+                "scripts": {
+                    "check": "node ../../record-concurrency.js",
+                },
+            },
+        )
+
+
+def seed_workspace_changed_app_git_repo(fixture: Path, *, write_config: bool = False) -> None:
+    if write_config:
+        (fixture / "lpm.toml").write_text(
+            "[workspace]\nchanged-files-ignore-pattern = \"**/README.md\"\n",
+            encoding="utf-8",
+        )
+
+    write_package_json(
+        fixture / "packages" / "changed-app" / "package.json",
+        {
+            "name": "changed-app",
+            "version": "1.0.0",
+            "scripts": {
+                "check": "node -e \"require('fs').writeFileSync('ran-changed-app.txt','ok')\"",
+            },
+        },
+    )
+    (fixture / "packages" / "changed-app" / "README.md").write_text("before\n", encoding="utf-8")
+
+    run_git_command("workspace/filter-controls git init", fixture, ["init", "-b", "main"])
+    run_git_command("workspace/filter-controls git add baseline", fixture, ["add", "."])
+    run_git_command(
+        "workspace/filter-controls git commit baseline",
+        fixture,
+        ["commit", "-m", "baseline"],
+    )
+    run_git_command("workspace/filter-controls git checkout feature", fixture, ["checkout", "-b", "feature"])
+
+    (fixture / "packages" / "changed-app" / "README.md").write_text("after\n", encoding="utf-8")
+    run_git_command("workspace/filter-controls git add readme change", fixture, ["add", "."])
+    run_git_command(
+        "workspace/filter-controls git commit readme change",
+        fixture,
+        ["commit", "-m", "readme change"],
+    )
+
+
+def seed_workspace_test_pattern_git_repo(fixture: Path) -> None:
+    write_package_json(
+        fixture / "packages" / "test-pattern-utils" / "package.json",
+        {
+            "name": "test-pattern-utils",
+            "version": "1.0.0",
+            "scripts": {
+                "check": "node -e \"require('fs').writeFileSync('ran-utils.txt','ok')\"",
+            },
+        },
+    )
+    write_package_json(
+        fixture / "packages" / "test-pattern-app" / "package.json",
+        {
+            "name": "test-pattern-app",
+            "version": "1.0.0",
+            "dependencies": {
+                "test-pattern-utils": "workspace:*",
+            },
+            "scripts": {
+                "check": "node -e \"require('fs').writeFileSync('ran-app.txt','ok')\"",
+            },
+        },
+    )
+
+    utils_src = fixture / "packages" / "test-pattern-utils" / "src"
+    app_src = fixture / "packages" / "test-pattern-app" / "src"
+    utils_src.mkdir(parents=True, exist_ok=True)
+    app_src.mkdir(parents=True, exist_ok=True)
+    (utils_src / "index.js").write_text("module.exports = 'before'\n", encoding="utf-8")
+    (utils_src / "index.test.js").write_text("test('before', () => {})\n", encoding="utf-8")
+    (app_src / "index.js").write_text("require('test-pattern-utils')\n", encoding="utf-8")
+
+    run_git_command("workspace/filter-controls git init", fixture, ["init", "-b", "main"])
+    run_git_command("workspace/filter-controls git add baseline", fixture, ["add", "."])
+    run_git_command(
+        "workspace/filter-controls git commit baseline",
+        fixture,
+        ["commit", "-m", "baseline"],
+    )
+    run_git_command("workspace/filter-controls git checkout feature", fixture, ["checkout", "-b", "feature"])
+
+    (utils_src / "index.test.js").write_text("test('after', () => {})\n", encoding="utf-8")
+    run_git_command("workspace/filter-controls git add test-pattern change", fixture, ["add", "."])
+    run_git_command(
+        "workspace/filter-controls git commit test-pattern change",
+        fixture,
+        ["commit", "-m", "test pattern change"],
+    )
+
+
+def seed_workspace_combined_name_path_members(fixture: Path) -> None:
+    write_package_json(
+        fixture / "apps" / "scope-web" / "package.json",
+        {
+            "name": "@scope/web",
+            "version": "1.0.0",
+        },
+    )
+    write_package_json(
+        fixture / "packages" / "scope-ui" / "package.json",
+        {
+            "name": "@scope/ui",
+            "version": "1.0.0",
+        },
+    )
+    write_package_json(
+        fixture / "apps" / "other-admin" / "package.json",
+        {
+            "name": "@other/admin",
+            "version": "1.0.0",
+        },
+    )
+
+
+def selected_workspace_names(stdout: str) -> set[str]:
+    return {line.strip() for line in stdout.splitlines() if line.strip()}
 
 
 def reset_pack_fixture() -> Path:
@@ -2698,33 +3150,196 @@ def scenario_install_engines() -> None:
 def scenario_workspace_targeting() -> None:
     fixture = reset_workspace_targeting_fixture()
 
-    run_command(
-        "workspace/targeting filtered install from root",
-        fixture,
-        [str(LPM_BIN), "install", "kleur", "--filter", "./apps/*", "-y"],
-    )
-    require_contains(
-        (fixture / "apps" / "web" / "package.json").read_text(encoding="utf-8"),
-        '"kleur"',
-        "workspace/targeting web package.json",
-    )
-    require_contains(
-        (fixture / "apps" / "docs" / "package.json").read_text(encoding="utf-8"),
-        '"kleur"',
-        "workspace/targeting docs package.json",
-    )
-    require_not_contains(
-        (fixture / "packages" / "core" / "package.json").read_text(encoding="utf-8"),
-        '"kleur"',
-        "workspace/targeting core package.json",
-    )
+    try:
+        run_command(
+            "workspace/targeting filtered install from root",
+            fixture,
+            [str(LPM_BIN), "install", "kleur", "--filter", "./apps/*", "-y"],
+        )
+        require_contains(
+            (fixture / "apps" / "web" / "package.json").read_text(encoding="utf-8"),
+            '"kleur"',
+            "workspace/targeting web package.json",
+        )
+        require_contains(
+            (fixture / "apps" / "docs" / "package.json").read_text(encoding="utf-8"),
+            '"kleur"',
+            "workspace/targeting docs package.json",
+        )
+        require_not_contains(
+            (fixture / "packages" / "core" / "package.json").read_text(encoding="utf-8"),
+            '"kleur"',
+            "workspace/targeting core package.json",
+        )
 
-    no_match_output = run_command_expect_failure(
-        "workspace/targeting no-match filter",
-        fixture,
-        [str(LPM_BIN), "install", "kleur", "--filter", "./missing/*", "--fail-if-no-match"],
-    )
-    require_contains(no_match_output.lower(), "match", "workspace/targeting no-match output")
+        no_match_output = run_command_expect_failure(
+            "workspace/targeting no-match filter",
+            fixture,
+            [str(LPM_BIN), "install", "kleur", "--filter", "./missing/*", "--fail-if-no-match"],
+        )
+        require_contains(no_match_output.lower(), "match", "workspace/targeting no-match output")
+    finally:
+        reset_workspace_targeting_fixture()
+
+
+def scenario_workspace_filter_controls() -> None:
+    try:
+        filter_prod_fixture = reset_workspace_targeting_fixture()
+        seed_workspace_filter_prod_members(filter_prod_fixture)
+
+        run_command(
+            "workspace/filter-controls filter-prod run",
+            filter_prod_fixture,
+            [str(LPM_BIN), "run", "check", "--filter-prod", "...project-3"],
+        )
+        require_exists(filter_prod_fixture / "packages" / "project-1" / "ran-project-1.txt")
+        require_exists(filter_prod_fixture / "packages" / "project-3" / "ran-project-3.txt")
+        require_not_exists(filter_prod_fixture / "packages" / "project-2" / "ran-project-2.txt")
+        require_not_exists(filter_prod_fixture / "packages" / "project-4" / "ran-project-4.txt")
+
+        no_bail_fixture = reset_workspace_targeting_fixture()
+        seed_workspace_no_bail_members(no_bail_fixture)
+
+        no_bail_result = run_command_result(
+            "workspace/filter-controls no-bail run",
+            no_bail_fixture,
+            [str(LPM_BIN), "run", "check", "--filter", "@smoke/no-bail-*", "--no-bail"],
+        )
+        if no_bail_result.returncode == 0:
+            raise SmokeFailure("workspace/filter-controls no-bail run: expected non-zero exit when one member fails")
+        require_exists(no_bail_fixture / "packages" / "no-bail-utils" / "ran-utils.txt")
+        require_exists(no_bail_fixture / "packages" / "no-bail-core" / "ran-core.txt")
+        require_exists(no_bail_fixture / "packages" / "no-bail-app" / "ran-app.txt")
+
+        concurrency_fixture = reset_workspace_targeting_fixture()
+        seed_workspace_concurrency_members(concurrency_fixture)
+
+        run_command(
+            "workspace/filter-controls workspace-concurrency run",
+            concurrency_fixture,
+            [
+                str(LPM_BIN),
+                "run",
+                "check",
+                "--filter",
+                "@smoke/concurrency-*",
+                "--workspace-concurrency",
+                "1",
+            ],
+        )
+        concurrency_state = read_json_file(concurrency_fixture / "concurrency-state.json")
+        if concurrency_state.get("max") != 1:
+            raise SmokeFailure(
+                "workspace/filter-controls workspace-concurrency run: expected max recorded concurrency to be 1"
+            )
+    finally:
+        reset_workspace_targeting_fixture()
+
+
+def scenario_workspace_filter_selectors() -> None:
+    try:
+        changed_cli_fixture = reset_workspace_targeting_fixture()
+        seed_workspace_changed_app_git_repo(changed_cli_fixture)
+
+        changed_cli_result = run_command_result(
+            "workspace/filter-selectors changed-files-ignore-pattern cli",
+            changed_cli_fixture,
+            [
+                str(LPM_BIN),
+                "filter",
+                "[main]",
+                "--changed-files-ignore-pattern",
+                "**/README.md",
+            ],
+        )
+        if changed_cli_result.returncode != 0:
+            raise SmokeFailure(
+                "workspace/filter-selectors changed-files-ignore-pattern cli failed with exit code "
+                f"{changed_cli_result.returncode}"
+            )
+        if "changed-app" in selected_workspace_names(changed_cli_result.stdout):
+            raise SmokeFailure(
+                "workspace/filter-selectors changed-files-ignore-pattern cli: expected README-only changes to be ignored"
+            )
+
+        changed_config_fixture = reset_workspace_targeting_fixture()
+        seed_workspace_changed_app_git_repo(changed_config_fixture, write_config=True)
+
+        changed_config_result = run_command_result(
+            "workspace/filter-selectors changed-files-ignore-pattern config",
+            changed_config_fixture,
+            [str(LPM_BIN), "filter", "[main]"],
+        )
+        if changed_config_result.returncode != 0:
+            raise SmokeFailure(
+                "workspace/filter-selectors changed-files-ignore-pattern config failed with exit code "
+                f"{changed_config_result.returncode}"
+            )
+        if "changed-app" in selected_workspace_names(changed_config_result.stdout):
+            raise SmokeFailure(
+                "workspace/filter-selectors changed-files-ignore-pattern config: expected workspace config to ignore README-only changes"
+            )
+
+        test_pattern_fixture = reset_workspace_targeting_fixture()
+        seed_workspace_test_pattern_git_repo(test_pattern_fixture)
+
+        test_pattern_filter_result = run_command_result(
+            "workspace/filter-selectors test-pattern filter",
+            test_pattern_fixture,
+            [str(LPM_BIN), "filter", "...[main]", "--test-pattern", "**/*.test.js"],
+        )
+        if test_pattern_filter_result.returncode != 0:
+            raise SmokeFailure(
+                "workspace/filter-selectors test-pattern filter failed with exit code "
+                f"{test_pattern_filter_result.returncode}"
+            )
+        test_pattern_filter_names = selected_workspace_names(test_pattern_filter_result.stdout)
+        if "test-pattern-utils" not in test_pattern_filter_names:
+            raise SmokeFailure(
+                "workspace/filter-selectors test-pattern filter: expected directly changed test-pattern-utils to stay selected"
+            )
+        if "test-pattern-app" in test_pattern_filter_names:
+            raise SmokeFailure(
+                "workspace/filter-selectors test-pattern filter: expected test-only changes to avoid dependent expansion"
+            )
+
+        test_pattern_run_result = run_command_result(
+            "workspace/filter-selectors test-pattern affected run",
+            test_pattern_fixture,
+            [str(LPM_BIN), "run", "check", "--affected", "--test-pattern", "**/*.test.js"],
+        )
+        if test_pattern_run_result.returncode != 0:
+            raise SmokeFailure(
+                "workspace/filter-selectors test-pattern affected run failed with exit code "
+                f"{test_pattern_run_result.returncode}"
+            )
+        require_exists(test_pattern_fixture / "packages" / "test-pattern-utils" / "ran-utils.txt")
+        require_not_exists(test_pattern_fixture / "packages" / "test-pattern-app" / "ran-app.txt")
+
+        combined_fixture = reset_workspace_targeting_fixture()
+        seed_workspace_combined_name_path_members(combined_fixture)
+
+        combined_result = run_command_result(
+            "workspace/filter-selectors combined name+path filter",
+            combined_fixture,
+            [str(LPM_BIN), "filter", "@scope/*{./apps/scope-web}"],
+        )
+        if combined_result.returncode != 0:
+            raise SmokeFailure(
+                "workspace/filter-selectors combined name+path filter failed with exit code "
+                f"{combined_result.returncode}"
+            )
+        combined_names = selected_workspace_names(combined_result.stdout)
+        if "@scope/web" not in combined_names:
+            raise SmokeFailure(
+                "workspace/filter-selectors combined name+path filter: expected @scope/web to match both selector halves"
+            )
+        if "@scope/ui" in combined_names or "@other/admin" in combined_names:
+            raise SmokeFailure(
+                "workspace/filter-selectors combined name+path filter: expected non-intersecting members to stay excluded"
+            )
+    finally:
+        reset_workspace_targeting_fixture()
 
 
 def scenario_install_uninstall() -> None:
@@ -3585,6 +4200,512 @@ def scenario_install_save_policy() -> None:
         )
         if read_dependency_spec(existing_range_fixture / "package.json", "smoke-save-lib") != "~1.2.3":
             raise SmokeFailure("install/save-policy existing range preserved: expected smoke-save-lib to stay at ~1.2.3")
+
+
+def scenario_install_peer_deps() -> None:
+    registry_packages = [
+        {
+            "name": "optional-peer-host",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "peerDependencies": {"ghost-peer": "^1.0.0"},
+                        "peerDependenciesMeta": {
+                            "ghost-peer": {"optional": True}
+                        },
+                    },
+                    "package_json_extra": {
+                        "peerDependencies": {"ghost-peer": "^1.0.0"},
+                        "peerDependenciesMeta": {
+                            "ghost-peer": {"optional": True}
+                        },
+                    },
+                    "files": {},
+                }
+            },
+        },
+        {
+            "name": "required-peer-host",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "peerDependencies": {"missing-peer": "^1.0.0"},
+                    },
+                    "package_json_extra": {
+                        "peerDependencies": {"missing-peer": "^1.0.0"},
+                    },
+                    "files": {},
+                }
+            },
+        },
+        {
+            "name": "peer-consumer-a",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "peerDependencies": {"shared-peer": "^1.0.0"},
+                    },
+                    "package_json_extra": {
+                        "peerDependencies": {"shared-peer": "^1.0.0"},
+                    },
+                    "files": {},
+                }
+            },
+        },
+        {
+            "name": "peer-consumer-b",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "peerDependencies": {"shared-peer": "^2.0.0"},
+                    },
+                    "package_json_extra": {
+                        "peerDependencies": {"shared-peer": "^2.0.0"},
+                    },
+                    "files": {},
+                }
+            },
+        },
+        {
+            "name": "shared-peer",
+            "dist_tags": {"latest": "2.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                },
+                "2.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                },
+            },
+        },
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as lpm_home:
+        scenario_env = {"LPM_HOME": lpm_home, "LPM_STORE_VERSION": "v2"}
+        install_flags = [
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+
+        optional_fixture = reset_peer_deps_fixture(
+            "optional-missing",
+            PEER_DEPS_OPTIONAL_MISSING_BASELINE_PACKAGE_JSON,
+        )
+        write_registry_npmrc(optional_fixture, registry.registry_url)
+        optional_output = run_command(
+            "install/peer-deps optional peer missing",
+            optional_fixture,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        require_exists(optional_fixture / "node_modules" / "optional-peer-host" / "package.json")
+        require_not_exists(optional_fixture / "node_modules" / "ghost-peer")
+        require_not_contains(
+            optional_output,
+            "requires peer ghost-peer",
+            "install/peer-deps optional peer output",
+        )
+
+        required_fixture = reset_peer_deps_fixture(
+            "required-missing",
+            PEER_DEPS_REQUIRED_MISSING_BASELINE_PACKAGE_JSON,
+        )
+        write_registry_npmrc(required_fixture, registry.registry_url)
+        required_result = run_command_result(
+            "install/peer-deps missing required peer json",
+            required_fixture,
+            [str(LPM_BIN), "--json", "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        if required_result.returncode != 0:
+            raise SmokeFailure(
+                "install/peer-deps missing required peer json failed with exit code "
+                f"{required_result.returncode}"
+            )
+        required_envelope = parse_json_stdout(
+            "install/peer-deps missing required peer json",
+            required_result,
+        )
+        peer_issues = required_envelope.get("peer_issues")
+        if required_envelope.get("success") is not True or not isinstance(peer_issues, dict):
+            raise SmokeFailure(
+                "install/peer-deps missing required peer json: expected success=true with peer_issues"
+            )
+        if (
+            peer_issues.get("total_count") != 1
+            or peer_issues.get("missing_count") != 1
+            or peer_issues.get("bad_count") != 0
+            or peer_issues.get("conflicts_count") != 0
+        ):
+            raise SmokeFailure(
+                "install/peer-deps missing required peer json: expected one missing peer issue only"
+            )
+        missing_items = peer_issues.get("missing")
+        if not isinstance(missing_items, list) or len(missing_items) != 1:
+            raise SmokeFailure(
+                "install/peer-deps missing required peer json: expected one missing[] entry"
+            )
+        missing_issue = missing_items[0]
+        if not isinstance(missing_issue, dict):
+            raise SmokeFailure(
+                "install/peer-deps missing required peer json: missing[] entry must be an object"
+            )
+        if (
+            missing_issue.get("package") != "required-peer-host"
+            or missing_issue.get("peer") != "missing-peer"
+            or missing_issue.get("required_range") != "^1.0.0"
+            or missing_issue.get("resolved_version") is not None
+        ):
+            raise SmokeFailure(
+                "install/peer-deps missing required peer json: unexpected missing peer payload"
+            )
+        if required_envelope.get("peer_conflicts") != []:
+            raise SmokeFailure(
+                "install/peer-deps missing required peer json: expected legacy peer_conflicts to stay empty"
+            )
+        require_exists(required_fixture / "node_modules" / "required-peer-host" / "package.json")
+        require_not_exists(required_fixture / "node_modules" / "missing-peer")
+
+        strict_fixture = reset_peer_deps_fixture(
+            "required-missing",
+            PEER_DEPS_REQUIRED_MISSING_BASELINE_PACKAGE_JSON,
+        )
+        write_registry_npmrc(strict_fixture, registry.registry_url)
+        strict_output = run_command_expect_failure(
+            "install/peer-deps strict missing required peer",
+            strict_fixture,
+            [
+                str(LPM_BIN),
+                "install",
+                "--strict-peer-dependencies",
+                *install_flags,
+            ],
+            extra_env=scenario_env,
+        )
+        require_contains(
+            strict_output,
+            "strict-peer-dependencies",
+            "install/peer-deps strict missing required peer output",
+        )
+        require_contains(
+            strict_output,
+            "missing-peer",
+            "install/peer-deps strict missing required peer output",
+        )
+
+        conflict_fixture = reset_peer_deps_fixture(
+            "conflict",
+            PEER_DEPS_CONFLICT_BASELINE_PACKAGE_JSON,
+        )
+        write_registry_npmrc(conflict_fixture, registry.registry_url)
+        conflict_result = run_command_result(
+            "install/peer-deps peer conflict json",
+            conflict_fixture,
+            [str(LPM_BIN), "--json", "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        if conflict_result.returncode != 0:
+            raise SmokeFailure(
+                "install/peer-deps peer conflict json failed with exit code "
+                f"{conflict_result.returncode}"
+            )
+        conflict_envelope = parse_json_stdout(
+            "install/peer-deps peer conflict json",
+            conflict_result,
+        )
+        conflict_peer_issues = conflict_envelope.get("peer_issues")
+        if conflict_envelope.get("success") is not True or not isinstance(conflict_peer_issues, dict):
+            raise SmokeFailure(
+                "install/peer-deps peer conflict json: expected success=true with peer_issues"
+            )
+        if (
+            conflict_peer_issues.get("total_count") != 2
+            or conflict_peer_issues.get("missing_count") != 0
+            or conflict_peer_issues.get("bad_count") != 1
+            or conflict_peer_issues.get("conflicts_count") != 1
+        ):
+            raise SmokeFailure(
+                "install/peer-deps peer conflict json: expected one bad peer and one conflict"
+            )
+        bad_items = conflict_peer_issues.get("bad")
+        conflict_items = conflict_peer_issues.get("conflicts")
+        if not isinstance(bad_items, list) or len(bad_items) != 1:
+            raise SmokeFailure(
+                "install/peer-deps peer conflict json: expected one bad[] entry"
+            )
+        if not isinstance(conflict_items, list) or len(conflict_items) != 1:
+            raise SmokeFailure(
+                "install/peer-deps peer conflict json: expected one conflicts[] entry"
+            )
+        bad_issue = bad_items[0]
+        if not isinstance(bad_issue, dict) or (
+            bad_issue.get("package") != "peer-consumer-a"
+            or bad_issue.get("peer") != "shared-peer"
+            or bad_issue.get("resolved_version") != "2.0.0"
+        ):
+            raise SmokeFailure(
+                "install/peer-deps peer conflict json: unexpected bad[] payload"
+            )
+        conflict_issue = conflict_items[0]
+        if not isinstance(conflict_issue, dict) or (
+            conflict_issue.get("canonical") != "shared-peer"
+            or conflict_issue.get("chosen_version") != "2.0.0"
+        ):
+            raise SmokeFailure(
+                "install/peer-deps peer conflict json: unexpected conflicts[] payload"
+            )
+        if conflict_envelope.get("peer_conflicts") != conflict_items:
+            raise SmokeFailure(
+                "install/peer-deps peer conflict json: expected peer_conflicts to match peer_issues.conflicts"
+            )
+        require_contains(
+            read_optional_text(conflict_fixture / "lpm.lock"),
+            "auto-isolated-peer-conflicts = true",
+            "install/peer-deps peer conflict lpm.lock",
+        )
+
+        warm_output = run_command(
+            "install/peer-deps peer conflict warm install",
+            conflict_fixture,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        require_contains(
+            warm_output,
+            "Up to date",
+            "install/peer-deps peer conflict warm install output",
+        )
+
+        explicit_hoisted_fixture = reset_peer_deps_fixture(
+            "conflict",
+            PEER_DEPS_CONFLICT_BASELINE_PACKAGE_JSON,
+        )
+        write_registry_npmrc(explicit_hoisted_fixture, registry.registry_url)
+        run_command(
+            "install/peer-deps peer conflict explicit hoisted",
+            explicit_hoisted_fixture,
+            [str(LPM_BIN), "install", "--linker", "hoisted", *install_flags],
+            extra_env=scenario_env,
+        )
+        require_not_contains(
+            read_optional_text(explicit_hoisted_fixture / "lpm.lock"),
+            "auto-isolated-peer-conflicts = true",
+            "install/peer-deps peer conflict explicit hoisted lpm.lock",
+        )
+
+
+def scenario_install_catalog() -> None:
+    registry_packages = [
+        {
+            "name": "is-positive",
+            "dist_tags": {"latest": "2.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                },
+                "2.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                },
+            },
+        }
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as lpm_home:
+        scenario_env = {"LPM_HOME": lpm_home}
+        install_flags = [
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+
+        manual_fixture = reset_catalog_fixture(
+            "manual",
+            CATALOG_MANUAL_BASELINE_PACKAGE_JSON,
+        )
+        write_registry_npmrc(manual_fixture, registry.registry_url)
+        run_command(
+            "install/catalog manual save policy",
+            manual_fixture,
+            [str(LPM_BIN), "install", "is-positive", *install_flags],
+            extra_env=scenario_env,
+        )
+        if read_dependency_spec(manual_fixture / "package.json", "is-positive") != "^2.0.0":
+            raise SmokeFailure(
+                "install/catalog manual save policy: expected matching catalog entry to keep the raw save range"
+            )
+
+        force_default_fixture = reset_catalog_fixture(
+            "manual",
+            CATALOG_MANUAL_BASELINE_PACKAGE_JSON,
+        )
+        write_registry_npmrc(force_default_fixture, registry.registry_url)
+        run_command(
+            "install/catalog force default catalog flag",
+            force_default_fixture,
+            [str(LPM_BIN), "install", "--catalog", "is-positive", *install_flags],
+            extra_env=scenario_env,
+        )
+        if read_dependency_spec(force_default_fixture / "package.json", "is-positive") != "catalog:":
+            raise SmokeFailure(
+                "install/catalog force default catalog flag: expected --catalog to save catalog:"
+            )
+
+        prefer_fixture = reset_catalog_fixture(
+            "prefer",
+            CATALOG_PREFER_BASELINE_PACKAGE_JSON,
+        )
+        write_registry_npmrc(prefer_fixture, registry.registry_url)
+        run_command(
+            "install/catalog prefer save policy",
+            prefer_fixture,
+            [str(LPM_BIN), "install", "is-positive", *install_flags],
+            extra_env=scenario_env,
+        )
+        if read_dependency_spec(prefer_fixture / "package.json", "is-positive") != "catalog:":
+            raise SmokeFailure(
+                "install/catalog prefer save policy: expected matching catalog entry to save catalog:"
+            )
+
+        strict_fixture = reset_catalog_fixture(
+            "strict",
+            CATALOG_STRICT_BASELINE_PACKAGE_JSON,
+        )
+        write_registry_npmrc(strict_fixture, registry.registry_url)
+        strict_output = run_command_expect_failure(
+            "install/catalog strict mismatch failure",
+            strict_fixture,
+            [str(LPM_BIN), "install", "is-positive@2.0.0", *install_flags],
+            extra_env=scenario_env,
+        )
+        require_contains(
+            strict_output,
+            "catalog",
+            "install/catalog strict mismatch output",
+        )
+        require_contains(
+            strict_output,
+            "strict",
+            "install/catalog strict mismatch output",
+        )
+        require_contains(
+            strict_output,
+            "is-positive@2.0.0",
+            "install/catalog strict mismatch output",
+        )
+        require_not_contains(
+            strict_output,
+            "Installing 1 package",
+            "install/catalog strict mismatch output",
+        )
+        require_not_contains(
+            strict_output,
+            "+ is-positive@2.0.0",
+            "install/catalog strict mismatch output",
+        )
+        if read_dependency_spec(strict_fixture / "package.json", "is-positive") is not None:
+            raise SmokeFailure(
+                "install/catalog strict mismatch failure: expected package.json rollback with no dependency save"
+            )
+        require_not_exists(strict_fixture / "lpm.lock")
+        require_not_exists(strict_fixture / "lpm.lockb")
+        require_not_exists(strict_fixture / "node_modules")
+        require_not_exists(strict_fixture / "node_modules" / "is-positive")
+
+        named_fixture = reset_catalog_fixture(
+            "named",
+            CATALOG_NAMED_BASELINE_PACKAGE_JSON,
+        )
+        write_registry_npmrc(named_fixture, registry.registry_url)
+        run_command(
+            "install/catalog named catalog flag",
+            named_fixture,
+            [str(LPM_BIN), "install", "--catalog=testing", "is-positive", *install_flags],
+            extra_env=scenario_env,
+        )
+        if read_dependency_spec(named_fixture / "package.json", "is-positive") != "catalog:testing":
+            raise SmokeFailure(
+                "install/catalog named catalog flag: expected --catalog=<name> to save catalog:<name>"
+            )
+
+        cleanup_fixture = reset_catalog_fixture(
+            "cleanup",
+            CATALOG_CLEANUP_BASELINE_PACKAGE_JSON,
+        )
+        write_registry_npmrc(cleanup_fixture, registry.registry_url)
+        run_command(
+            "install/catalog cleanupUnusedCatalogs package.json",
+            cleanup_fixture,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        cleanup_manifest = read_json_file(cleanup_fixture / "package.json")
+        cleanup_catalogs = cleanup_manifest.get("catalogs")
+        if not isinstance(cleanup_catalogs, dict):
+            raise SmokeFailure(
+                "install/catalog cleanupUnusedCatalogs package.json: expected catalogs object after install"
+            )
+        default_catalog = cleanup_catalogs.get("default")
+        if not isinstance(default_catalog, dict):
+            raise SmokeFailure(
+                "install/catalog cleanupUnusedCatalogs package.json: expected default catalog after install"
+            )
+        if default_catalog.get("is-positive") != "^2.0.0":
+            raise SmokeFailure(
+                "install/catalog cleanupUnusedCatalogs package.json: expected used catalog entry to stay intact"
+            )
+        if "unused-lib" in default_catalog:
+            raise SmokeFailure(
+                "install/catalog cleanupUnusedCatalogs package.json: expected unused catalog entry to be pruned"
+            )
+
+        pnpm_workspace_fixture = reset_catalog_fixture(
+            "pnpm-workspace",
+            CATALOG_PNPM_WORKSPACE_BASELINE_PACKAGE_JSON,
+            pnpm_workspace_yaml=CATALOG_PNPM_WORKSPACE_BASELINE_YAML,
+        )
+        write_registry_npmrc(pnpm_workspace_fixture, registry.registry_url)
+        run_command(
+            "install/catalog pnpm-workspace catalog resolution",
+            pnpm_workspace_fixture,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        if read_installed_package_version(pnpm_workspace_fixture, "is-positive") != "2.0.0":
+            raise SmokeFailure(
+                "install/catalog pnpm-workspace catalog resolution: expected catalog: dependency to resolve through pnpm-workspace.yaml"
+            )
+        workspace_yaml = read_optional_text(pnpm_workspace_fixture / "pnpm-workspace.yaml")
+        require_contains(
+            workspace_yaml,
+            "is-positive: ^2.0.0",
+            "install/catalog pnpm-workspace.yaml after cleanup",
+        )
+        require_not_contains(
+            workspace_yaml,
+            "unused-lib",
+            "install/catalog pnpm-workspace.yaml after cleanup",
+        )
 
 
 def scenario_install_script_policy() -> None:
@@ -9649,6 +10770,14 @@ SCENARIOS = {
         "Run save-policy coverage for bare, explicit, tag, prerelease, wildcard, and re-install cases.",
         scenario_install_save_policy,
     ),
+    "install-peer-deps": (
+        "Run peer-dependency coverage for optional peers, strict failures, peer_issues JSON, and auto-isolated peer-conflict installs.",
+        scenario_install_peer_deps,
+    ),
+    "install-catalog": (
+        "Run catalog coverage for manual/prefer/strict save policy, --catalog flags, cleanupUnusedCatalogs, and pnpm-workspace catalogs.",
+        scenario_install_catalog,
+    ),
     "install-project-discovery": (
         "Run nearest-ancestor and fresh-dir project discovery checks for lpm install.",
         scenario_install_project_discovery,
@@ -9672,6 +10801,14 @@ SCENARIOS = {
     "workspace-targeting": (
         "Run filtered workspace installs and assert app-only targets mutate while unmatched filters fail.",
         scenario_workspace_targeting,
+    ),
+    "workspace-filter-controls": (
+        "Run workspace-filter control coverage for --filter-prod, --no-bail, and --workspace-concurrency.",
+        scenario_workspace_filter_controls,
+    ),
+    "workspace-filter-selectors": (
+        "Run workspace-filter selector coverage for changed-file ignore patterns, --test-pattern, and pkg{path}.",
+        scenario_workspace_filter_selectors,
     ),
     "workspace-pack": (
         "Run lpm pack workspace E2E coverage for root-bin reuse, per-member JSON envelopes, no-match failures, and multi-member watch rejection.",

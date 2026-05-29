@@ -1,0 +1,13 @@
+{
+  "name": "catalog-named-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "catalogs": {
+    "testing": {
+      "is-positive": "^2.0.0"
+    }
+  },
+  "dependencies": {
+    "is-positive": "catalog:testing"
+  }
+}

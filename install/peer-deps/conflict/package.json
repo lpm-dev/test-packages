@@ -1,0 +1,9 @@
+{
+    "name": "peer-deps-conflict-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "peer-consumer-a": "^1.0.0",
+        "peer-consumer-b": "^1.0.0"
+    }
+}

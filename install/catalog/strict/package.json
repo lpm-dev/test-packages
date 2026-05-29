@@ -1,0 +1,13 @@
+{
+    "name": "catalog-strict-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "catalogs": {
+        "default": {
+            "is-positive": "^1.0.0"
+        }
+    },
+    "lpm": {
+        "catalogMode": "strict"
+    }
+}

@@ -1,0 +1,8 @@
+{
+    "name": "catalog-pnpm-workspace-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "is-positive": "catalog:"
+    }
+}

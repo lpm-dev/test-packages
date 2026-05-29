@@ -1,0 +1,11 @@
+{
+    "name": "peer-deps-required-missing-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "required-peer-host": "^1.0.0"
+    },
+    "lpm": {
+        "autoInstallPeers": false
+    }
+}

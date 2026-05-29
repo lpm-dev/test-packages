@@ -23,6 +23,8 @@ Current seed fixture:
 - `uninstall/` — local uninstall fixture for dependency/devDependency removal, lockfile-pair cleanup, and untouched peer/optional/trusted dependency state
 - `project-discovery/` — install-root discovery fixtures for nearest-ancestor and fresh-dir behavior
 - `engines/` — install fixtures for `engines.lpm` enforcement and opt-out coverage
+- `peer-deps/` — mock-registry fixtures for optional-peer suppression, strict missing-peer failures, structured `peer_issues`, and peer-conflict auto-isolation
+- `catalog/` — mock-registry fixtures for catalog save policy, `--catalog` forcing, cleanup pruning, and `pnpm-workspace.yaml` catalog ingestion
 - `save-policy/` — mock-registry fixtures for dependency save-spec behavior (`^`, exact, explicit ranges, `@latest`, prerelease dist-tags, wildcard, re-install)
 - `script-policy/` — mock-registry fixtures for default deny plus triage green and amber lifecycle-script behavior through project `.npmrc` routing
 - `offline-integrity/` — tarball-URL fixtures for `--strict-integrity`, warm-store `--offline --strict-integrity`, and cold-store offline failures
@@ -41,6 +43,8 @@ Relevant runner entries:
 - `python3 run_smokes.py install-upgrade`
 - `python3 run_smokes.py install-uninstall`
 - `python3 run_smokes.py install-uninstall-global`
+- `python3 run_smokes.py install-peer-deps`
+- `python3 run_smokes.py install-catalog`
 - `python3 run_smokes.py install-save-policy`
 - `python3 run_smokes.py install-script-policy`
 - `python3 run_smokes.py install-offline-integrity`
