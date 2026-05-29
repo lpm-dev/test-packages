@@ -29,7 +29,19 @@ from urllib.request import urlopen
 
 
 ROOT = Path(__file__).resolve().parent
-RUST_CLIENT_ROOT = ROOT.parent / "rust-client"
+
+
+def resolve_rust_client_root() -> Path:
+    configured = os.environ.get("LPM_SMOKE_RUST_CLIENT_ROOT")
+    if not configured:
+        return ROOT.parent / "rust-client"
+    configured_path = Path(configured).expanduser()
+    if configured_path.is_absolute():
+        return configured_path.resolve()
+    return (Path.cwd() / configured_path).resolve()
+
+
+RUST_CLIENT_ROOT = resolve_rust_client_root()
 LPM_MANIFEST = RUST_CLIENT_ROOT / "Cargo.toml"
 WORKSPACE_TARGETING_FIXTURE = ROOT / "workspace" / "targeting"
 
@@ -10449,6 +10461,230 @@ def scenario_install_setup_commands() -> None:
             )
 
 
+def scenario_install_auth_commands() -> None:
+    def credentials_path(home: str) -> Path:
+        return Path(home) / ".lpm" / ".credentials"
+
+    def write_publish_package(project_path: Path, package_name: str) -> None:
+        project_path.joinpath("package.json").write_text(
+            json.dumps(
+                {
+                    "name": package_name,
+                    "version": "1.0.0",
+                    "description": "Publish auth smoke",
+                    "main": "index.js",
+                    "license": "MIT",
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    common_auth_env = {
+        "LPM_FORCE_FILE_AUTH": "1",
+        "LPM_TEST_FAST_SCRYPT": "1",
+        "LPM_DISABLE_HOST_CLI_AUTH": "0",
+    }
+
+    with tempfile.TemporaryDirectory(prefix="lpm-auth-fake-bin-") as fake_bin_dir:
+        fake_bin = Path(fake_bin_dir)
+        empty_bin = fake_bin / "empty"
+        empty_bin.mkdir(parents=True, exist_ok=True)
+
+        write_executable(
+            fake_bin / "gh",
+            "#!/bin/sh\n"
+            "if [ \"$1\" = auth ] && [ \"$2\" = token ]; then\n"
+            "  printf 'gh-cli-token\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            "exit 1\n",
+        )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-auth-gh-home-") as gh_home, tempfile.TemporaryDirectory(
+            prefix="lpm-auth-gh-project-"
+        ) as gh_project:
+            gh_result = run_command_result(
+                "install/auth github host-cli login json",
+                Path(gh_project),
+                [str(LPM_BIN), "--json", "login", "--github"],
+                extra_env={
+                    **common_auth_env,
+                    "LPM_HOME": gh_home,
+                    "PATH": os.pathsep.join([str(fake_bin), os.environ.get("PATH", "")]),
+                },
+            )
+            if gh_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/auth github host-cli login json failed with exit code {gh_result.returncode}"
+                )
+            gh_envelope = json.loads(gh_result.stdout)
+            if gh_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/auth github host-cli login json: expected success=true"
+                )
+            if gh_envelope.get("source") != "gh":
+                raise SmokeFailure(
+                    "install/auth github host-cli login json: expected source='gh'"
+                )
+            if gh_envelope.get("stored") is not False:
+                raise SmokeFailure(
+                    "install/auth github host-cli login json: expected stored=false"
+                )
+            if credentials_path(gh_home).exists():
+                raise SmokeFailure(
+                    "install/auth github host-cli login json: expected gh-backed login to avoid creating ~/.lpm/.credentials"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-auth-npm-home-") as npm_home, tempfile.TemporaryDirectory(
+            prefix="lpm-auth-npm-project-"
+        ) as npm_project:
+            npm_result = run_command_result(
+                "install/auth npm env login json",
+                Path(npm_project),
+                [str(LPM_BIN), "--json", "login", "--npm"],
+                extra_env={
+                    **common_auth_env,
+                    "LPM_HOME": npm_home,
+                    "NPM_TOKEN": "npm-env-token",
+                },
+            )
+            if npm_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/auth npm env login json failed with exit code {npm_result.returncode}"
+                )
+            npm_envelope = json.loads(npm_result.stdout)
+            if npm_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/auth npm env login json: expected success=true"
+                )
+            if npm_envelope.get("source") != "env:NPM_TOKEN":
+                raise SmokeFailure(
+                    "install/auth npm env login json: expected source='env:NPM_TOKEN'"
+                )
+            if npm_envelope.get("stored") is not True:
+                raise SmokeFailure(
+                    "install/auth npm env login json: expected stored=true"
+                )
+            if not credentials_path(npm_home).exists():
+                raise SmokeFailure(
+                    "install/auth npm env login json: expected npm env-token login to create ~/.lpm/.credentials"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-auth-gitlab-home-") as gitlab_home, tempfile.TemporaryDirectory(
+            prefix="lpm-auth-gitlab-project-"
+        ) as gitlab_project:
+            gitlab_result = run_command_result(
+                "install/auth gitlab explicit-token login json",
+                Path(gitlab_project),
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "login",
+                    "--gitlab",
+                    "--token",
+                    "gitlab-fallback-token",
+                ],
+                extra_env={
+                    **common_auth_env,
+                    "LPM_HOME": gitlab_home,
+                },
+            )
+            if gitlab_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/auth gitlab explicit-token login json failed with exit code {gitlab_result.returncode}"
+                )
+            gitlab_envelope = json.loads(gitlab_result.stdout)
+            if gitlab_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/auth gitlab explicit-token login json: expected success=true"
+                )
+            if gitlab_envelope.get("source") != "explicit-token":
+                raise SmokeFailure(
+                    "install/auth gitlab explicit-token login json: expected source='explicit-token'"
+                )
+            if gitlab_envelope.get("stored") is not True:
+                raise SmokeFailure(
+                    "install/auth gitlab explicit-token login json: expected stored=true"
+                )
+            if not credentials_path(gitlab_home).exists():
+                raise SmokeFailure(
+                    "install/auth gitlab explicit-token login json: expected explicit GitLab login to create ~/.lpm/.credentials"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-auth-home-") as publish_home, tempfile.TemporaryDirectory(
+            prefix="lpm-publish-auth-project-"
+        ) as publish_project:
+            publish_project_path = Path(publish_project)
+            write_publish_package(publish_project_path, "publish-auth-smoke")
+            publish_project_path.joinpath("index.js").write_text(
+                "module.exports = {}\n", encoding="utf-8"
+            )
+
+            hermetic_publish_env = {
+                **common_auth_env,
+                "LPM_HOME": publish_home,
+                "PATH": str(empty_bin),
+            }
+
+            npm_publish_output = run_command_expect_failure(
+                "install/auth publish npm missing auth",
+                publish_project_path,
+                [str(LPM_BIN), "publish", "--yes", "--npm"],
+                extra_env=hermetic_publish_env,
+            )
+            require_contains(
+                npm_publish_output,
+                "lpm login --npm",
+                "install/auth publish npm missing auth guidance",
+            )
+            require_contains(
+                npm_publish_output,
+                "NPM_TOKEN",
+                "install/auth publish npm missing auth env guidance",
+            )
+
+            write_publish_package(publish_project_path, "@smoke/publish-auth-smoke")
+
+            github_publish_output = run_command_expect_failure(
+                "install/auth publish github missing auth",
+                publish_project_path,
+                [str(LPM_BIN), "publish", "--yes", "--github"],
+                extra_env=hermetic_publish_env,
+            )
+            require_contains(
+                github_publish_output,
+                "gh auth login",
+                "install/auth publish github missing auth gh guidance",
+            )
+            require_contains(
+                github_publish_output,
+                "GITHUB_TOKEN",
+                "install/auth publish github missing auth env guidance",
+            )
+
+            publish_project_path.joinpath("lpm.json").write_text(
+                json.dumps({"publish": {"gitlab": {"projectId": "12345"}}}) + "\n",
+                encoding="utf-8",
+            )
+            gitlab_publish_output = run_command_expect_failure(
+                "install/auth publish gitlab missing auth",
+                publish_project_path,
+                [str(LPM_BIN), "publish", "--yes", "--gitlab"],
+                extra_env=hermetic_publish_env,
+            )
+            require_contains(
+                gitlab_publish_output,
+                "glab auth login",
+                "install/auth publish gitlab missing auth glab guidance",
+            )
+            require_contains(
+                gitlab_publish_output,
+                "GITLAB_TOKEN/CI_JOB_TOKEN",
+                "install/auth publish gitlab missing auth env guidance",
+            )
+
+
 def scenario_install_global_install() -> None:
     shared_bin = "smoke-global"
     alias_bin = "smoke-global-beta"
@@ -10689,6 +10925,10 @@ SCENARIOS = {
     "install-setup": (
         "Run lpm setup ci/local coverage for renamed command parsing, CI .npmrc generation, and local read-only token setup.",
         scenario_install_setup_commands,
+    ),
+    "install-auth": (
+        "Run third-party login fallback coverage plus missing-auth publish guidance for npm, GitHub Packages, and GitLab Packages.",
+        scenario_install_auth_commands,
     ),
     "install-migrate-npm": (
         "Run lpm migrate npm coverage for dry-run no-write behavior, non-destructive backup creation, default .npmrc setup, and rollback cleanup.",
