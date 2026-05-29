@@ -383,6 +383,20 @@ PATCH_COMMAND_BASELINE_PACKAGE_JSON = """{
 }
 """
 
+PATCH_COMMAND_TRACKED_FIXTURE = ROOT / "install" / "patch" / "basic"
+
+PATCH_COMMAND_TRACKED_PACKAGE_JSON = (PATCH_COMMAND_TRACKED_FIXTURE / "package.json").read_text(
+        encoding="utf-8"
+)
+
+PATCH_COMMAND_TRACKED_NPMRC = (PATCH_COMMAND_TRACKED_FIXTURE / ".npmrc").read_text(
+        encoding="utf-8"
+)
+
+PATCH_COMMAND_TRACKED_PATCH = (
+        PATCH_COMMAND_TRACKED_FIXTURE / "patches" / "smoke-patch-lib@1.0.0.patch"
+).read_text(encoding="utf-8")
+
 PATCH_SCOPED_COMMAND_BASELINE_PACKAGE_JSON = """{
     \"name\": \"patch-scoped-command-smoke\",
     \"private\": true,
@@ -2084,6 +2098,18 @@ def reset_patch_command_fixture() -> Path:
         fixture,
         baseline_files={"package.json": PATCH_COMMAND_BASELINE_PACKAGE_JSON},
         extra_delete=[".npmrc", "patches"],
+    )
+
+
+def restore_patch_command_fixture() -> Path:
+    fixture = ROOT / "install" / "patch" / "basic"
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={
+            ".npmrc": PATCH_COMMAND_TRACKED_NPMRC,
+            "package.json": PATCH_COMMAND_TRACKED_PACKAGE_JSON,
+            "patches/smoke-patch-lib@1.0.0.patch": PATCH_COMMAND_TRACKED_PATCH,
+        },
     )
 
 
@@ -6686,6 +6712,129 @@ def scenario_install_patch_command() -> None:
         )
         delete_path(pristine_staging_dir)
 
+        package_json_before_remove = (fixture / "package.json").read_text(encoding="utf-8")
+        patch_remove_dry_run = run_command_result(
+            "install/patch patch-remove dry-run bare-name json",
+            fixture,
+            [str(LPM_BIN), "--json", "patch-remove", "--dry-run", package_name],
+            extra_env=scenario_env,
+        )
+        if patch_remove_dry_run.returncode != 0:
+            raise SmokeFailure(
+                f"install/patch patch-remove dry-run bare-name json failed with exit code {patch_remove_dry_run.returncode}"
+            )
+        dry_run_envelope = json.loads(patch_remove_dry_run.stdout)
+        if dry_run_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/patch patch-remove dry-run bare-name json: expected success=true"
+            )
+        if dry_run_envelope.get("dry_run") is not True:
+            raise SmokeFailure(
+                "install/patch patch-remove dry-run bare-name json: expected dry_run=true"
+            )
+        if dry_run_envelope.get("removed", [{}])[0].get("key") != f"{package_name}@{version}":
+            raise SmokeFailure(
+                "install/patch patch-remove dry-run bare-name json: expected bare-name selector to resolve to the exact patched key"
+            )
+        if dry_run_envelope.get("removed", [{}])[0].get("retained_reason") != "dry-run":
+            raise SmokeFailure(
+                "install/patch patch-remove dry-run bare-name json: expected retained_reason=dry-run"
+            )
+        if (fixture / "package.json").read_text(encoding="utf-8") != package_json_before_remove:
+            raise SmokeFailure(
+                "install/patch patch-remove dry-run bare-name json: expected package.json to stay unchanged"
+            )
+        require_exists(patch_file)
+
+        patch_remove_result = run_command_result(
+            "install/patch patch-remove exact json",
+            fixture,
+            [str(LPM_BIN), "--json", "patch-remove", f"{package_name}@{version}"],
+            extra_env=scenario_env,
+        )
+        if patch_remove_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/patch patch-remove exact json failed with exit code {patch_remove_result.returncode}"
+            )
+        patch_remove_envelope = json.loads(patch_remove_result.stdout)
+        if patch_remove_envelope.get("success") is not True:
+            raise SmokeFailure("install/patch patch-remove exact json: expected success=true")
+        if patch_remove_envelope.get("removed", [{}])[0].get("deleted_patch_file") is not True:
+            raise SmokeFailure(
+                "install/patch patch-remove exact json: expected default removal to delete the unshared patch file"
+            )
+        require_not_exists(patch_file)
+        package_json_after_remove = read_json_file(fixture / "package.json")
+        if package_json_after_remove.get("lpm") is not None:
+            raise SmokeFailure(
+                "install/patch patch-remove exact json: expected empty lpm section to be removed from package.json"
+            )
+        if installed_file.read_text(encoding="utf-8") != patched_source:
+            raise SmokeFailure(
+                "install/patch patch-remove exact json: expected node_modules to stay patched until the next install"
+            )
+
+        delete_path(fixture / "node_modules")
+        run_command(
+            "install/patch patch-remove reinstall restores upstream",
+            fixture,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        if installed_file.read_text(encoding="utf-8") != original_source:
+            raise SmokeFailure(
+                "install/patch patch-remove reinstall restores upstream: expected upstream bytes after the patch manifest entry was removed"
+            )
+
+        package_json_keep_file = read_json_file(fixture / "package.json")
+        package_json_keep_file["lpm"] = {
+            "patchedDependencies": {
+                f"{package_name}@{version}": {
+                    "path": f"patches/{package_name}@{version}.patch",
+                    "originalIntegrity": commit_envelope.get("original_integrity"),
+                }
+            }
+        }
+        write_package_json(fixture / "package.json", package_json_keep_file)
+        patch_file.parent.mkdir(parents=True, exist_ok=True)
+        patch_file.write_text(patch_text, encoding="utf-8")
+
+        keep_file_result = run_command_result(
+            "install/patch patch-remove keep-file json",
+            fixture,
+            [str(LPM_BIN), "--json", "patch-remove", "--keep-file", f"{package_name}@{version}"],
+            extra_env=scenario_env,
+        )
+        if keep_file_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/patch patch-remove keep-file json failed with exit code {keep_file_result.returncode}"
+            )
+        keep_file_envelope = json.loads(keep_file_result.stdout)
+        if keep_file_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/patch patch-remove keep-file json: expected success=true"
+            )
+        if keep_file_envelope.get("keep_file") is not True:
+            raise SmokeFailure(
+                "install/patch patch-remove keep-file json: expected keep_file=true"
+            )
+        if keep_file_envelope.get("removed", [{}])[0].get("retained_reason") != "keep-file":
+            raise SmokeFailure(
+                "install/patch patch-remove keep-file json: expected retained_reason=keep-file"
+            )
+        require_exists(patch_file)
+        package_json_after_keep_file = read_json_file(fixture / "package.json")
+        if package_json_after_keep_file.get("lpm") is not None:
+            raise SmokeFailure(
+                "install/patch patch-remove keep-file json: expected empty lpm section to be removed even when the patch file is retained"
+            )
+
+        restore_patch_command_fixture()
+        if (fixture / "package.json").read_text(encoding="utf-8") != PATCH_COMMAND_TRACKED_PACKAGE_JSON:
+            raise SmokeFailure(
+                "install/patch cleanup: expected the tracked patch fixture package.json bytes to be restored"
+            )
+
 
 def scenario_install_patch_scoped_command() -> None:
     package_name = "@smoke/patch-lib"
@@ -6901,6 +7050,364 @@ def scenario_install_patch_binary_command() -> None:
 
         require_not_exists(fixture / "patches" / f"{package_name}@{version}.patch")
         delete_path(staging_dir)
+
+
+def scenario_install_hidden_scripts() -> None:
+    with tempfile.TemporaryDirectory(prefix="lpm-hidden-scripts-home-") as lpm_home, tempfile.TemporaryDirectory(
+        prefix="lpm-hidden-scripts-project-"
+    ) as project_dir:
+        project_path = Path(project_dir)
+        write_package_json(
+            project_path / "package.json",
+            {
+                "name": "hidden-scripts-smoke",
+                "version": "1.0.0",
+                "private": True,
+                "scripts": {
+                    "build": "node build-visible.js",
+                    "invoke-hidden": "node invoke-hidden.js",
+                    ".build": "node write-hidden.js",
+                },
+            },
+        )
+        write_package_json(
+            project_path / "lpm.json",
+            {
+                "tasks": {
+                    "build": {
+                        "dependsOn": [".build"],
+                    }
+                }
+            },
+        )
+        project_path.joinpath("write-hidden.js").write_text(
+            "const fs = require('fs');\n"
+            "fs.appendFileSync('hidden-ran.log', 'hidden\\n');\n",
+            encoding="utf-8",
+        )
+        project_path.joinpath("build-visible.js").write_text(
+            "process.stdout.write('visible-build\\n');\n",
+            encoding="utf-8",
+        )
+        project_path.joinpath("invoke-hidden.js").write_text(
+            "const { spawnSync } = require('child_process');\n"
+            "const result = spawnSync(process.env.LPM_TEST_BIN, ['run', '.build'], { stdio: 'inherit' });\n"
+            "process.exit(result.status === null ? 1 : result.status);\n",
+            encoding="utf-8",
+        )
+
+        scenario_env = {
+            "LPM_HOME": lpm_home,
+            "LPM_TEST_BIN": str(LPM_BIN),
+        }
+
+        direct_run_output = run_command_expect_failure(
+            "install/hidden-scripts direct run rejected",
+            project_path,
+            [str(LPM_BIN), "run", ".build"],
+            extra_env=scenario_env,
+        )
+        require_contains(
+            direct_run_output,
+            "hidden script",
+            "install/hidden-scripts direct run rejected",
+        )
+        require_contains(
+            direct_run_output,
+            "cannot be invoked directly",
+            "install/hidden-scripts direct run rejected",
+        )
+
+        shortcut_output = run_command_expect_failure(
+            "install/hidden-scripts shorthand rejected",
+            project_path,
+            [str(LPM_BIN), ".build"],
+            extra_env=scenario_env,
+        )
+        require_contains(
+            shortcut_output,
+            "hidden script",
+            "install/hidden-scripts shorthand rejected",
+        )
+        require_contains(
+            shortcut_output,
+            "cannot be invoked directly",
+            "install/hidden-scripts shorthand rejected",
+        )
+
+        missing_output = run_command_expect_failure(
+            "install/hidden-scripts missing suggestions omit hidden",
+            project_path,
+            [str(LPM_BIN), "run", "missing"],
+            extra_env=scenario_env,
+        )
+        require_contains(
+            missing_output,
+            "build",
+            "install/hidden-scripts missing suggestions omit hidden",
+        )
+        require_not_contains(
+            missing_output,
+            ".build",
+            "install/hidden-scripts missing suggestions omit hidden",
+        )
+
+        invoke_hidden_result = run_command_result(
+            "install/hidden-scripts visible script can invoke hidden",
+            project_path,
+            [str(LPM_BIN), "run", "invoke-hidden"],
+            extra_env=scenario_env,
+        )
+        if invoke_hidden_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/hidden-scripts visible script can invoke hidden failed with exit code {invoke_hidden_result.returncode}"
+            )
+        hidden_log = project_path.joinpath("hidden-ran.log")
+        require_exists(hidden_log)
+        if hidden_log.read_text(encoding="utf-8") != "hidden\n":
+            raise SmokeFailure(
+                "install/hidden-scripts visible script can invoke hidden: expected the hidden helper to run exactly once"
+            )
+
+        dependency_result = run_command_result(
+            "install/hidden-scripts lpm-json dependency can invoke hidden",
+            project_path,
+            [str(LPM_BIN), "run", "build"],
+            extra_env=scenario_env,
+        )
+        if dependency_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/hidden-scripts lpm-json dependency can invoke hidden failed with exit code {dependency_result.returncode}"
+            )
+        require_contains(
+            dependency_result.stdout,
+            "visible-build",
+            "install/hidden-scripts lpm-json dependency can invoke hidden stdout",
+        )
+        if hidden_log.read_text(encoding="utf-8") != "hidden\nhidden\n":
+            raise SmokeFailure(
+                "install/hidden-scripts lpm-json dependency can invoke hidden: expected the hidden helper to run once via the visible script and once via dependsOn"
+            )
+
+
+def scenario_install_sbom_command() -> None:
+    package_name = "smoke-sbom-lib"
+    version = "1.0.0"
+    patch_rel_path = f"patches/{package_name}@{version}.patch"
+    patch_text = "diff --git a/index.js b/index.js\n"
+    patch_sha256 = hashlib.sha256(patch_text.encode("utf-8")).hexdigest()
+    registry_packages = [
+        {
+            "name": package_name,
+            "description": "registry description",
+            "dist_tags": {"latest": version},
+            "versions": {
+                version: {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "description": "registry description",
+                        "license": "Apache-2.0",
+                        "homepage": "https://example.test/sbom-lib",
+                    },
+                    "package_json_extra": {},
+                    "files": {"index.js": "module.exports = 'sbom-lib'\n"},
+                }
+            },
+        }
+    ]
+
+    def write_sbom_lockfile(project_path: Path, registry_url: str) -> None:
+        lines = [
+            "[metadata]",
+            "lockfile-version = 2",
+            'resolved-with = "greedy-fusion"',
+            "",
+            "[[packages]]",
+            f'name = "{package_name}"',
+            f'version = "{version}"',
+            f'source = "registry+{registry_url.rstrip('/')}"',
+            'integrity = "sha512-smoke-sbom-lib"',
+            f'tarball = "{registry_url}tarballs/{package_name}/-/{package_name}-{version}.tgz"',
+            "",
+        ]
+        (project_path / "lpm.lock").write_text("\n".join(lines), encoding="utf-8")
+
+    def cyclonedx_component(envelope: dict[str, object], name: str) -> dict[str, object]:
+        components = envelope.get("components")
+        if not isinstance(components, list):
+            raise SmokeFailure("install/sbom cyclonedx: expected components array")
+        for component in components:
+            if isinstance(component, dict) and component.get("name") == name:
+                return component
+        raise SmokeFailure(f"install/sbom cyclonedx: expected component {name!r}")
+
+    def component_property_map(component: dict[str, object]) -> dict[str, str]:
+        properties = component.get("properties")
+        if not isinstance(properties, list):
+            raise SmokeFailure("install/sbom: expected component properties array")
+        result: dict[str, str] = {}
+        for property_entry in properties:
+            if not isinstance(property_entry, dict):
+                continue
+            name = property_entry.get("name")
+            value = property_entry.get("value")
+            if isinstance(name, str) and isinstance(value, str):
+                result[name] = value
+        return result
+
+    def spdx_package(envelope: dict[str, object], name: str) -> dict[str, object]:
+        packages = envelope.get("packages")
+        if not isinstance(packages, list):
+            raise SmokeFailure("install/sbom spdx: expected packages array")
+        for package in packages:
+            if isinstance(package, dict) and package.get("name") == name:
+                return package
+        raise SmokeFailure(f"install/sbom spdx: expected package {name!r}")
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-sbom-home-"
+    ) as lpm_home, tempfile.TemporaryDirectory(prefix="lpm-sbom-project-") as project_dir:
+        project_path = Path(project_dir)
+        write_package_json(
+            project_path / "package.json",
+            {
+                "name": "sbom-smoke-app",
+                "version": "1.0.0",
+                "private": True,
+                "license": "MIT",
+                "dependencies": {package_name: f"^{version}"},
+                "lpm": {
+                    "patchedDependencies": {
+                        f"{package_name}@{version}": {
+                            "path": patch_rel_path,
+                            "originalIntegrity": "sha512-smoke-sbom-original",
+                        }
+                    }
+                },
+            },
+        )
+        write_registry_npmrc(project_path, registry.registry_url)
+        write_sbom_lockfile(project_path, registry.registry_url)
+        seed_node_modules_package(
+            project_path,
+            package_name,
+            version,
+            {"index.js": "module.exports = 'sbom-lib'\n"},
+        )
+        patch_path = project_path / patch_rel_path
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.write_text(patch_text, encoding="utf-8")
+
+        scenario_env = {"LPM_HOME": lpm_home}
+
+        cyclonedx_result = run_command_result(
+            "install/sbom cyclonedx local-first stdout",
+            project_path,
+            [str(LPM_BIN), "sbom"],
+            extra_env=scenario_env,
+        )
+        if cyclonedx_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/sbom cyclonedx local-first stdout failed with exit code {cyclonedx_result.returncode}"
+            )
+        cyclonedx_envelope = json.loads(cyclonedx_result.stdout)
+        if cyclonedx_envelope.get("bomFormat") != "CycloneDX":
+            raise SmokeFailure("install/sbom cyclonedx local-first stdout: expected bomFormat=CycloneDX")
+        if cyclonedx_envelope.get("specVersion") != "1.7":
+            raise SmokeFailure("install/sbom cyclonedx local-first stdout: expected specVersion=1.7")
+        component = cyclonedx_component(cyclonedx_envelope, package_name)
+        properties = component_property_map(component)
+        if properties.get("lpm:patch:path") != patch_rel_path:
+            raise SmokeFailure(
+                "install/sbom cyclonedx local-first stdout: expected patch path metadata in component properties"
+            )
+        if properties.get("lpm:patch:sha256") != f"sha256-{patch_sha256}":
+            raise SmokeFailure(
+                "install/sbom cyclonedx local-first stdout: expected patch sha256 metadata in component properties"
+            )
+        if "description" in component:
+            raise SmokeFailure(
+                "install/sbom cyclonedx local-first stdout: did not expect registry-only description without --registry-metadata"
+            )
+        if registry.requested_paths() != []:
+            raise SmokeFailure(
+                "install/sbom cyclonedx local-first stdout: expected no registry requests without --registry-metadata"
+            )
+        dependencies = cyclonedx_envelope.get("dependencies")
+        if not isinstance(dependencies, list):
+            raise SmokeFailure("install/sbom cyclonedx local-first stdout: expected dependencies array")
+        component_ref = component.get("bom-ref")
+        if not any(
+            isinstance(entry, dict)
+            and entry.get("ref") == "lpm:root"
+            and isinstance(entry.get("dependsOn"), list)
+            and component_ref in entry.get("dependsOn")
+            for entry in dependencies
+        ):
+            raise SmokeFailure(
+                "install/sbom cyclonedx local-first stdout: expected root dependency edge to the locked package"
+            )
+
+        spdx_result = run_command_result(
+            "install/sbom spdx stdout",
+            project_path,
+            [str(LPM_BIN), "sbom", "--format", "spdx"],
+            extra_env=scenario_env,
+        )
+        if spdx_result.returncode != 0:
+            raise SmokeFailure(f"install/sbom spdx stdout failed with exit code {spdx_result.returncode}")
+        spdx_envelope = json.loads(spdx_result.stdout)
+        if spdx_envelope.get("spdxVersion") != "SPDX-2.3":
+            raise SmokeFailure("install/sbom spdx stdout: expected spdxVersion=SPDX-2.3")
+        spdx_component = spdx_package(spdx_envelope, package_name)
+        attribution_texts = spdx_component.get("attributionTexts")
+        if not isinstance(attribution_texts, list) or f"lpm:patch:path={patch_rel_path}" not in attribution_texts:
+            raise SmokeFailure(
+                "install/sbom spdx stdout: expected patch metadata in package attributionTexts"
+            )
+        if not any(
+            isinstance(relationship, dict) and relationship.get("relationshipType") == "DEPENDS_ON"
+            for relationship in spdx_envelope.get("relationships", [])
+        ):
+            raise SmokeFailure(
+                "install/sbom spdx stdout: expected at least one DEPENDS_ON relationship"
+            )
+
+        registry_metadata_result = run_command_result(
+            "install/sbom registry-metadata output file",
+            project_path,
+            [
+                str(LPM_BIN),
+                "sbom",
+                "--registry-metadata",
+                "--output",
+                "bom.registry.json",
+            ],
+            extra_env=scenario_env,
+        )
+        if registry_metadata_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/sbom registry-metadata output file failed with exit code {registry_metadata_result.returncode}"
+            )
+        if registry_metadata_result.stdout:
+            raise SmokeFailure(
+                "install/sbom registry-metadata output file: expected --output to suppress stdout payload"
+            )
+        registry_metadata_paths = registry.requested_paths()
+        if not registry_metadata_paths:
+            raise SmokeFailure(
+                "install/sbom registry-metadata output file: expected registry metadata requests when --registry-metadata is set"
+            )
+        if not any(path in {f"/{package_name}", f"/api/registry/{package_name}", "/api/registry/batch-metadata"} for path in registry_metadata_paths):
+            raise SmokeFailure(
+                "install/sbom registry-metadata output file: expected package metadata requests routed through the configured registry"
+            )
+        written_envelope = read_json_file(project_path / "bom.registry.json")
+        written_component = cyclonedx_component(written_envelope, package_name)
+        if written_component.get("description") != "registry description":
+            raise SmokeFailure(
+                "install/sbom registry-metadata output file: expected registry description enrichment in the written CycloneDX SBOM"
+            )
 
 
 def scenario_install_download_command() -> None:
@@ -11288,7 +11795,7 @@ SCENARIOS = {
         scenario_install_rebuild_command,
     ),
     "install-patch": (
-        "Run lpm patch and patch-commit coverage for lockfile resolution, patch file generation, manifest registration, reinstall auto-apply, pristine re-extracts, and no-change aborts.",
+        "Run lpm patch, patch-commit, and patch-remove coverage for lockfile resolution, patch file generation, dry-run and keep-file removal, reinstall refresh behavior, pristine re-extracts, and no-change aborts.",
         scenario_install_patch_command,
     ),
     "install-patch-scoped": (
@@ -11298,6 +11805,14 @@ SCENARIOS = {
     "install-patch-binary": (
         "Run lpm patch-commit binary-edit rejection coverage and prove the failed commit writes neither a patch file nor a manifest mutation.",
         scenario_install_patch_binary_command,
+    ),
+    "install-hidden-scripts": (
+        "Run hidden package.json script coverage for direct rejection, omission from missing-script suggestions, nested invocation from visible scripts, and lpm.json dependsOn allowance.",
+        scenario_install_hidden_scripts,
+    ),
+    "install-sbom": (
+        "Run lpm sbom coverage for default CycloneDX output, SPDX output, offline local-first behavior, registry metadata enrichment, output-file writes, dependency edges, and patch metadata.",
+        scenario_install_sbom_command,
     ),
     "install-download": (
         "Run lpm download coverage for JSON output, canonical output paths, stripped extraction layout, and read-only no-install side effects.",
