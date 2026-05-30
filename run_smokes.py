@@ -1181,6 +1181,205 @@ class MockRegistry:
         return [path for _, path in self._server.request_log]
 
 
+class _RemoteCacheHTTPServer(ThreadingHTTPServer):
+    def __init__(self) -> None:
+        super().__init__(("127.0.0.1", 0), _RemoteCacheRequestHandler)
+        self.request_log: list[dict[str, object]] = []
+        self.artifact_bytes: bytes | None = None
+        self.artifact_tag: str | None = None
+        self.download_bytes_override: bytes | None = None
+        self.download_tag_override: str | None = None
+        self.download_status_code: int | None = None
+        self.download_body: dict[str, object] | None = None
+        self.status_code = 200
+        self.status_body: dict[str, object] = {
+            "status": "enabled",
+            "usageBytes": 1024,
+            "limitBytes": 2048,
+        }
+        self.upload_status_code = 200
+        self.upload_body: dict[str, object] | None = None
+
+
+class _RemoteCacheRequestHandler(BaseHTTPRequestHandler):
+    server: _RemoteCacheHTTPServer
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def do_GET(self) -> None:
+        parsed = self._record_request(0)
+        if parsed.path == "/v8/artifacts/status":
+            self._json_response(self.server.status_code, self.server.status_body)
+            return
+
+        if parsed.path.startswith("/v8/artifacts/"):
+            if self.server.download_status_code is not None:
+                self._json_response(
+                    self.server.download_status_code,
+                    self.server.download_body
+                    or {"error": "remote cache download override"},
+                )
+                return
+
+            payload = self.server.download_bytes_override
+            if payload is None:
+                payload = self.server.artifact_bytes
+            if payload is None:
+                self.send_error(404)
+                return
+
+            tag = self.server.download_tag_override
+            if tag is None:
+                tag = self.server.artifact_tag
+
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", str(len(payload)))
+            if tag is not None:
+                self.send_header("x-artifact-tag", tag)
+            self.end_headers()
+            self.wfile.write(payload)
+            return
+
+        self.send_error(404)
+
+    def do_PUT(self) -> None:
+        body = self._read_body()
+        parsed = self._record_request(len(body))
+        if not parsed.path.startswith("/v8/artifacts/"):
+            self.send_error(404)
+            return
+
+        if self.server.upload_status_code != 200:
+            self._json_response(
+                self.server.upload_status_code,
+                self.server.upload_body
+                or {"error": "remote cache upload override"},
+            )
+            return
+
+        self.server.artifact_bytes = body
+        self.server.artifact_tag = self.headers.get("x-artifact-tag")
+        hash_value = parsed.path.rsplit("/", 1)[-1]
+        origin = f"http://127.0.0.1:{self.server.server_port}"
+        self._json_response(
+            200,
+            self.server.upload_body
+            or {"urls": [f"{origin}/v8/artifacts/{hash_value}"]},
+        )
+
+    def _read_body(self) -> bytes:
+        content_length = self.headers.get("Content-Length")
+        if content_length is None:
+            return b""
+        return self.rfile.read(int(content_length))
+
+    def _record_request(self, body_length: int) -> ParseResult:
+        parsed = urlparse(self.path)
+        self.server.request_log.append(
+            {
+                "method": self.command,
+                "path": parsed.path,
+                "query": parse_qs(parsed.query),
+                "headers": {key.lower(): value for key, value in self.headers.items()},
+                "body_length": body_length,
+            }
+        )
+        return parsed
+
+    def _json_response(self, status_code: int, payload: dict[str, object]) -> None:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class MockRemoteCache:
+    def __init__(self) -> None:
+        self._server: _RemoteCacheHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> "MockRemoteCache":
+        self._server = _RemoteCacheHTTPServer()
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=2)
+        self._server = None
+        self._thread = None
+
+    @property
+    def base_url(self) -> str:
+        server = self._require_server()
+        return f"http://127.0.0.1:{server.server_port}/v8"
+
+    @property
+    def artifact_tag(self) -> str | None:
+        return self._require_server().artifact_tag
+
+    def requests(self, method: str | None = None, path: str | None = None) -> list[dict[str, object]]:
+        requests = list(self._require_server().request_log)
+        if method is not None:
+            requests = [entry for entry in requests if entry.get("method") == method]
+        if path is not None:
+            requests = [entry for entry in requests if entry.get("path") == path]
+        return requests
+
+    def clear_requests(self) -> None:
+        self._require_server().request_log.clear()
+
+    def reset_artifact(self) -> None:
+        server = self._require_server()
+        server.artifact_bytes = None
+        server.artifact_tag = None
+        server.download_bytes_override = None
+        server.download_tag_override = None
+        server.download_status_code = None
+        server.download_body = None
+        server.upload_status_code = 200
+        server.upload_body = None
+
+    def set_status(self, status_code: int, body: dict[str, object]) -> None:
+        server = self._require_server()
+        server.status_code = status_code
+        server.status_body = body
+
+    def set_download_tag_override(self, tag: str | None) -> None:
+        self._require_server().download_tag_override = tag
+
+    def set_download_response(
+        self,
+        status_code: int | None,
+        body: dict[str, object] | None = None,
+    ) -> None:
+        server = self._require_server()
+        server.download_status_code = status_code
+        server.download_body = body
+
+    def set_upload_response(
+        self,
+        status_code: int,
+        body: dict[str, object] | None = None,
+    ) -> None:
+        server = self._require_server()
+        server.upload_status_code = status_code
+        server.upload_body = body
+
+    def _require_server(self) -> _RemoteCacheHTTPServer:
+        if self._server is None:
+            raise SmokeFailure("remote cache server accessed before startup")
+        return self._server
+
+
 def log(message: str) -> None:
     print(f"[smoke] {message}", flush=True)
 
@@ -7939,6 +8138,626 @@ def scenario_install_migrate_yarn() -> None:
         require_contains(lpm_lock_text, 'name = "prettier"', "install/migrate-yarn lpm.lock")
 
 
+def scenario_install_remote_cache() -> None:
+    build_script = """const fs = require(\"node:fs\")
+
+fs.mkdirSync(\"dist\", { recursive: true })
+fs.writeFileSync(\"dist/value.txt\", \"remote-cache-output\\n\", \"utf8\")
+fs.writeFileSync(\"executed-marker\", \"ran\\n\", \"utf8\")
+process.stdout.write(\"remote-build-output\\n\")
+"""
+
+    def write_remote_cache_project(
+        project_dir: Path,
+        package_name: str,
+        remote_cache_config: dict[str, object],
+    ) -> None:
+        write_package_json(
+            project_dir / "package.json",
+            {
+                "name": package_name,
+                "private": True,
+                "version": "1.0.0",
+                "scripts": {
+                    "build": "node build-script.cjs",
+                },
+            },
+        )
+        (project_dir / "build-script.cjs").write_text(build_script, encoding="utf-8")
+        (project_dir / "lpm.json").write_text(
+            json.dumps(
+                {
+                    "tasks": {
+                        "build": {
+                            "cache": True,
+                            "outputs": ["dist/**"],
+                        }
+                    },
+                    "remoteCache": remote_cache_config,
+                },
+                indent=4,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def assert_slug_requests(
+        requests: list[dict[str, object]],
+        context: str,
+    ) -> None:
+        if not requests:
+            raise SmokeFailure(f"{context}: expected at least one remote cache request")
+        for request in requests:
+            query = request.get("query")
+            if not isinstance(query, dict) or query.get("slug") != ["acme"]:
+                raise SmokeFailure(f"{context}: expected slug=acme on every remote cache request")
+
+    with MockRemoteCache() as remote_cache:
+        signature_env = {
+            "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
+            "LPM_REMOTE_CACHE_SIGNATURE_KEY": "remote-cache-signature-key",
+        }
+
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+            with tempfile.TemporaryDirectory(prefix="lpm-remote-cache-project-") as project_dir:
+                project_path = Path(project_dir)
+                write_remote_cache_project(
+                    project_path,
+                    "remote-cache-smoke",
+                    {
+                        "enabled": True,
+                        "team": "acme",
+                        "url": remote_cache.base_url,
+                        "signature": True,
+                    },
+                )
+
+                scenario_env = {
+                    "LPM_HOME": lpm_home,
+                    **signature_env,
+                }
+
+                first_run = run_command_result(
+                    "install/remote-cache initial upload",
+                    project_path,
+                    [str(LPM_BIN), "run", "build"],
+                    extra_env=scenario_env,
+                )
+                if first_run.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache initial upload failed with exit code "
+                        f"{first_run.returncode}"
+                    )
+                require_exists(project_path / "dist" / "value.txt")
+                require_exists(project_path / "executed-marker")
+
+                initial_artifact_requests = remote_cache.requests(path="/v8/artifacts/status")
+                if initial_artifact_requests:
+                    raise SmokeFailure(
+                        "install/remote-cache initial upload: build should not query cache status"
+                    )
+
+                initial_gets = remote_cache.requests(method="GET", path="/v8/artifacts/build")
+                if initial_gets:
+                    raise SmokeFailure(
+                        "install/remote-cache initial upload: expected hashed artifact paths, not /v8/artifacts/build"
+                    )
+
+                initial_puts = remote_cache.requests(method="PUT")
+                if len(initial_puts) != 1:
+                    raise SmokeFailure(
+                        "install/remote-cache initial upload: expected exactly one artifact upload"
+                    )
+                assert_slug_requests(remote_cache.requests(), "install/remote-cache initial upload")
+                if remote_cache.artifact_tag is None or not remote_cache.artifact_tag.startswith("sha256="):
+                    raise SmokeFailure(
+                        "install/remote-cache initial upload: expected an HMAC artifact tag on the upload"
+                    )
+
+                status_result = run_command_result(
+                    "install/remote-cache cache status json",
+                    project_path,
+                    [str(LPM_BIN), "--json", "cache", "status"],
+                    extra_env=scenario_env,
+                )
+                if status_result.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status json failed with exit code "
+                        f"{status_result.returncode}"
+                    )
+                status_envelope = json.loads(status_result.stdout)
+                if status_envelope.get("success") is not True:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status json: expected success=true"
+                    )
+                if status_envelope.get("local", {}).get("bytes", 0) <= 0:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status json: expected local cache bytes after the initial build"
+                    )
+                remote_envelope = status_envelope.get("remote", {})
+                if remote_envelope.get("enabled") is not True:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status json: expected remote.enabled=true"
+                    )
+                if remote_envelope.get("url") != remote_cache.base_url:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status json: expected the configured remote cache URL"
+                    )
+                if remote_envelope.get("team") != "acme":
+                    raise SmokeFailure(
+                        "install/remote-cache cache status json: expected remote.team=acme"
+                    )
+                if remote_envelope.get("status") != "enabled":
+                    raise SmokeFailure(
+                        "install/remote-cache cache status json: expected remote.status=enabled"
+                    )
+                if remote_envelope.get("usage_bytes") != 1024:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status json: expected remote.usage_bytes=1024"
+                    )
+                if remote_envelope.get("limit_bytes") != 2048:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status json: expected remote.limit_bytes=2048"
+                    )
+
+                status_requests = remote_cache.requests(method="GET", path="/v8/artifacts/status")
+                if len(status_requests) != 1:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status json: expected exactly one status request"
+                    )
+                assert_slug_requests(status_requests, "install/remote-cache cache status json")
+
+                remote_cache.clear_requests()
+                delete_path(Path(lpm_home) / "cache" / "tasks")
+                delete_path(project_path / "dist")
+                delete_path(project_path / "executed-marker")
+
+                remote_hit = run_command_result(
+                    "install/remote-cache remote hit restore",
+                    project_path,
+                    [str(LPM_BIN), "run", "build"],
+                    extra_env=scenario_env,
+                )
+                if remote_hit.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache remote hit restore failed with exit code "
+                        f"{remote_hit.returncode}"
+                    )
+                require_exists(project_path / "dist" / "value.txt")
+                require_not_exists(project_path / "executed-marker")
+                require_contains(
+                    remote_hit.stdout + remote_hit.stderr,
+                    "remote-build-output",
+                    "install/remote-cache remote hit output replay",
+                )
+                if remote_cache.requests(method="PUT"):
+                    raise SmokeFailure(
+                        "install/remote-cache remote hit restore: expected no upload on a remote cache hit"
+                    )
+                hit_gets = remote_cache.requests(method="GET")
+                if len(hit_gets) != 1:
+                    raise SmokeFailure(
+                        "install/remote-cache remote hit restore: expected exactly one remote artifact fetch"
+                    )
+                assert_slug_requests(hit_gets, "install/remote-cache remote hit restore")
+
+                remote_cache.set_download_tag_override("sha256=bad-signature")
+                remote_cache.clear_requests()
+                delete_path(Path(lpm_home) / "cache" / "tasks")
+                delete_path(project_path / "dist")
+                delete_path(project_path / "executed-marker")
+
+                invalid_signature = run_command_result(
+                    "install/remote-cache invalid signature fallback",
+                    project_path,
+                    [str(LPM_BIN), "run", "build"],
+                    extra_env=scenario_env,
+                )
+                if invalid_signature.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache invalid signature fallback failed with exit code "
+                        f"{invalid_signature.returncode}"
+                    )
+                require_exists(project_path / "dist" / "value.txt")
+                require_exists(project_path / "executed-marker")
+                invalid_signature_requests = remote_cache.requests()
+                if len([request for request in invalid_signature_requests if request.get("method") == "GET"]) != 1:
+                    raise SmokeFailure(
+                        "install/remote-cache invalid signature fallback: expected a remote fetch before the local rebuild"
+                    )
+                if len([request for request in invalid_signature_requests if request.get("method") == "PUT"]) != 1:
+                    raise SmokeFailure(
+                        "install/remote-cache invalid signature fallback: expected a fresh upload after the local rebuild"
+                    )
+                require_contains(
+                    invalid_signature.stdout + invalid_signature.stderr,
+                    "signature",
+                    "install/remote-cache invalid signature warning",
+                )
+                assert_slug_requests(
+                    invalid_signature_requests,
+                    "install/remote-cache invalid signature fallback",
+                )
+
+                remote_cache.set_download_tag_override(None)
+                remote_cache.set_status(503, {"error": "temporarily unavailable"})
+                remote_cache.clear_requests()
+                status_error = run_command_result(
+                    "install/remote-cache cache status degraded json",
+                    project_path,
+                    [str(LPM_BIN), "--json", "cache", "status"],
+                    extra_env=scenario_env,
+                )
+                if status_error.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status degraded json failed with exit code "
+                        f"{status_error.returncode}"
+                    )
+                status_error_envelope = json.loads(status_error.stdout)
+                if status_error_envelope.get("success") is not True:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status degraded json: expected success=true"
+                    )
+                degraded_remote = status_error_envelope.get("remote", {})
+                if degraded_remote.get("enabled") is not True:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status degraded json: expected remote.enabled=true"
+                    )
+                degraded_error = degraded_remote.get("error")
+                if not isinstance(degraded_error, str) or "HTTP 503" not in degraded_error:
+                    raise SmokeFailure(
+                        "install/remote-cache cache status degraded json: expected remote.error to mention HTTP 503"
+                    )
+
+        remote_cache.set_status(
+            200,
+            {
+                "status": "enabled",
+                "usageBytes": 1024,
+                "limitBytes": 2048,
+            },
+        )
+        remote_cache.reset_artifact()
+        remote_cache.clear_requests()
+
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as read_only_home:
+            with tempfile.TemporaryDirectory(prefix="lpm-remote-cache-project-") as project_dir:
+                project_path = Path(project_dir)
+                write_remote_cache_project(
+                    project_path,
+                    "remote-cache-read-only-smoke",
+                    {
+                        "enabled": True,
+                        "team": "acme",
+                        "url": remote_cache.base_url,
+                    },
+                )
+
+                read_only_result = run_command_result(
+                    "install/remote-cache read-only upload skip",
+                    project_path,
+                    [str(LPM_BIN), "run", "build"],
+                    extra_env={
+                        "LPM_HOME": read_only_home,
+                        "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
+                        "LPM_REMOTE_CACHE_READ_ONLY": "1",
+                    },
+                )
+                if read_only_result.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache read-only upload skip failed with exit code "
+                        f"{read_only_result.returncode}"
+                    )
+                if remote_cache.requests(method="PUT"):
+                    raise SmokeFailure(
+                        "install/remote-cache read-only upload skip: expected no upload while read-only is enabled"
+                    )
+                read_only_gets = remote_cache.requests(method="GET")
+                if len(read_only_gets) != 1:
+                    raise SmokeFailure(
+                        "install/remote-cache read-only upload skip: expected a single remote miss lookup"
+                    )
+                assert_slug_requests(
+                    read_only_gets,
+                    "install/remote-cache read-only upload skip",
+                )
+
+        remote_cache.reset_artifact()
+        remote_cache.clear_requests()
+
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as secret_home:
+            with tempfile.TemporaryDirectory(prefix="lpm-remote-cache-project-") as project_dir:
+                project_path = Path(project_dir)
+                write_remote_cache_project(
+                    project_path,
+                    "remote-cache-secret-smoke",
+                    {
+                        "enabled": True,
+                        "team": "acme",
+                        "url": remote_cache.base_url,
+                    },
+                )
+                (project_path / ".env").write_text(
+                    "DATABASE_URL=postgres://secret@example.test/lpm\n",
+                    encoding="utf-8",
+                )
+
+                secret_env = {
+                    "LPM_HOME": secret_home,
+                    "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
+                }
+
+                secret_first_run = run_command_result(
+                    "install/remote-cache secret env upload block",
+                    project_path,
+                    [str(LPM_BIN), "run", "build"],
+                    extra_env=secret_env,
+                )
+                if secret_first_run.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache secret env upload block failed with exit code "
+                        f"{secret_first_run.returncode}"
+                    )
+                if remote_cache.requests(method="PUT"):
+                    raise SmokeFailure(
+                        "install/remote-cache secret env upload block: expected no upload when secret-looking env vars are present"
+                    )
+                require_contains(
+                    secret_first_run.stdout + secret_first_run.stderr,
+                    "DATABASE_URL",
+                    "install/remote-cache secret env warning",
+                )
+
+                remote_cache.clear_requests()
+                delete_path(project_path / "dist")
+                delete_path(project_path / "executed-marker")
+
+                secret_local_hit = run_command_result(
+                    "install/remote-cache secret env local cache hit",
+                    project_path,
+                    [str(LPM_BIN), "run", "build"],
+                    extra_env=secret_env,
+                )
+                if secret_local_hit.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache secret env local cache hit failed with exit code "
+                        f"{secret_local_hit.returncode}"
+                    )
+                require_exists(project_path / "dist" / "value.txt")
+                require_not_exists(project_path / "executed-marker")
+                if remote_cache.requests():
+                    raise SmokeFailure(
+                        "install/remote-cache secret env local cache hit: expected no remote requests once the local cache is warm"
+                    )
+
+        remote_cache.reset_artifact()
+        remote_cache.clear_requests()
+
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as include_home:
+            with tempfile.TemporaryDirectory(prefix="lpm-remote-cache-project-") as project_dir:
+                project_path = Path(project_dir)
+                write_remote_cache_project(
+                    project_path,
+                    "remote-cache-include-smoke",
+                    {
+                        "enabled": True,
+                        "team": "acme",
+                        "url": remote_cache.base_url,
+                        "env": {
+                            "include": ["DATABASE_URL"],
+                        },
+                    },
+                )
+                (project_path / ".env").write_text(
+                    "DATABASE_URL=postgres://include@example.test/lpm\n",
+                    encoding="utf-8",
+                )
+
+                include_result = run_command_result(
+                    "install/remote-cache env include allow",
+                    project_path,
+                    [str(LPM_BIN), "run", "build"],
+                    extra_env={
+                        "LPM_HOME": include_home,
+                        "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
+                    },
+                )
+                if include_result.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache env include allow failed with exit code "
+                        f"{include_result.returncode}"
+                    )
+                if len(remote_cache.requests(method="PUT")) != 1:
+                    raise SmokeFailure(
+                        "install/remote-cache env include allow: expected an upload when DATABASE_URL is explicitly included"
+                    )
+                require_not_contains(
+                    include_result.stdout + include_result.stderr,
+                    "looks secret-like",
+                    "install/remote-cache env include allow warning",
+                )
+
+        remote_cache.reset_artifact()
+        remote_cache.clear_requests()
+
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as exclude_home:
+            with tempfile.TemporaryDirectory(prefix="lpm-remote-cache-project-") as project_dir:
+                project_path = Path(project_dir)
+                write_remote_cache_project(
+                    project_path,
+                    "remote-cache-exclude-smoke",
+                    {
+                        "enabled": True,
+                        "team": "acme",
+                        "url": remote_cache.base_url,
+                        "env": {
+                            "include": ["DATABASE_*"],
+                            "exclude": ["*_URL"],
+                        },
+                    },
+                )
+                (project_path / ".env").write_text(
+                    "DATABASE_URL=postgres://exclude@example.test/lpm\n",
+                    encoding="utf-8",
+                )
+
+                exclude_result = run_command_result(
+                    "install/remote-cache env exclude precedence",
+                    project_path,
+                    [str(LPM_BIN), "run", "build"],
+                    extra_env={
+                        "LPM_HOME": exclude_home,
+                        "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
+                    },
+                )
+                if exclude_result.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache env exclude precedence failed with exit code "
+                        f"{exclude_result.returncode}"
+                    )
+                if remote_cache.requests(method="PUT"):
+                    raise SmokeFailure(
+                        "install/remote-cache env exclude precedence: expected exclude to block the upload"
+                    )
+                require_contains(
+                    exclude_result.stdout + exclude_result.stderr,
+                    "DATABASE_URL",
+                    "install/remote-cache env exclude precedence warning",
+                )
+
+        remote_cache.reset_artifact()
+        remote_cache.clear_requests()
+
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as allow_secrets_home:
+            with tempfile.TemporaryDirectory(prefix="lpm-remote-cache-project-") as project_dir:
+                project_path = Path(project_dir)
+                write_remote_cache_project(
+                    project_path,
+                    "remote-cache-allow-secrets-smoke",
+                    {
+                        "enabled": True,
+                        "team": "acme",
+                        "url": remote_cache.base_url,
+                        "env": {
+                            "allowSecrets": True,
+                        },
+                    },
+                )
+                (project_path / ".env").write_text(
+                    "DATABASE_URL=postgres://allow-secrets@example.test/lpm\n",
+                    encoding="utf-8",
+                )
+
+                allow_secrets_result = run_command_result(
+                    "install/remote-cache env allowSecrets",
+                    project_path,
+                    [str(LPM_BIN), "run", "build"],
+                    extra_env={
+                        "LPM_HOME": allow_secrets_home,
+                        "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
+                    },
+                )
+                if allow_secrets_result.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache env allowSecrets failed with exit code "
+                        f"{allow_secrets_result.returncode}"
+                    )
+                if len(remote_cache.requests(method="PUT")) != 1:
+                    raise SmokeFailure(
+                        "install/remote-cache env allowSecrets: expected an upload when allowSecrets=true"
+                    )
+                require_not_contains(
+                    allow_secrets_result.stdout + allow_secrets_result.stderr,
+                    "looks secret-like",
+                    "install/remote-cache env allowSecrets warning",
+                )
+
+        remote_cache.reset_artifact()
+        remote_cache.clear_requests()
+        remote_cache.set_upload_response(
+            403,
+            {"error": "Token does not have remote cache write permissions"},
+        )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as forbidden_upload_home:
+            with tempfile.TemporaryDirectory(prefix="lpm-remote-cache-project-") as project_dir:
+                project_path = Path(project_dir)
+                write_remote_cache_project(
+                    project_path,
+                    "remote-cache-upload-forbidden-smoke",
+                    {
+                        "enabled": True,
+                        "team": "acme",
+                        "url": remote_cache.base_url,
+                    },
+                )
+
+                forbidden_upload_result = run_command_result(
+                    "install/remote-cache upload forbidden fallback",
+                    project_path,
+                    [str(LPM_BIN), "run", "build"],
+                    extra_env={
+                        "LPM_HOME": forbidden_upload_home,
+                        "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
+                    },
+                )
+                if forbidden_upload_result.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache upload forbidden fallback failed with exit code "
+                        f"{forbidden_upload_result.returncode}"
+                    )
+                require_exists(project_path / "dist" / "value.txt")
+                require_exists(project_path / "executed-marker")
+                if len(remote_cache.requests(method="PUT")) != 1:
+                    raise SmokeFailure(
+                        "install/remote-cache upload forbidden fallback: expected the upload attempt to reach the remote cache"
+                    )
+                require_contains(
+                    forbidden_upload_result.stdout + forbidden_upload_result.stderr,
+                    "not authorized",
+                    "install/remote-cache upload forbidden fallback warning",
+                )
+
+        remote_cache.set_upload_response(200)
+        remote_cache.reset_artifact()
+        remote_cache.clear_requests()
+
+        remote_cache.reset_artifact()
+        remote_cache.clear_requests()
+
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as disabled_home:
+            with tempfile.TemporaryDirectory(prefix="lpm-remote-cache-project-") as project_dir:
+                project_path = Path(project_dir)
+                write_remote_cache_project(
+                    project_path,
+                    "remote-cache-disabled-smoke",
+                    {
+                        "enabled": True,
+                        "team": "acme",
+                        "url": remote_cache.base_url,
+                    },
+                )
+
+                disabled_result = run_command_result(
+                    "install/remote-cache env disable override",
+                    project_path,
+                    [str(LPM_BIN), "run", "build"],
+                    extra_env={
+                        "LPM_HOME": disabled_home,
+                        "LPM_REMOTE_CACHE": "0",
+                    },
+                )
+                if disabled_result.returncode != 0:
+                    raise SmokeFailure(
+                        "install/remote-cache env disable override failed with exit code "
+                        f"{disabled_result.returncode}"
+                    )
+                if remote_cache.requests():
+                    raise SmokeFailure(
+                        "install/remote-cache env disable override: expected no remote requests when LPM_REMOTE_CACHE=0"
+                    )
+
+
 def scenario_install_cache_command() -> None:
     with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
         fixture = reset_cache_command_fixture()
@@ -11821,6 +12640,10 @@ SCENARIOS = {
     "install-resolve": (
         "Run lpm resolve coverage for multi-spec JSON output, scoped last-@ parsing, metadata-only routing, and read-only no-download behavior.",
         scenario_install_resolve_command,
+    ),
+    "install-remote-cache": (
+        "Run hosted remote-cache coverage for cache-status JSON, team-scoped remote hits, signature fallback, read-only and forbidden-upload degradation, remoteCache.env policy overrides, secret-env upload blocking, and the LPM_REMOTE_CACHE=0 override.",
+        scenario_install_remote_cache,
     ),
     "install-cache": (
         "Run lpm cache coverage for path output, metadata-path JSON, clear alias semantics, blanket clean JSON, and store/cache separation.",
