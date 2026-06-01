@@ -14,13 +14,17 @@ import re
 import select
 import shutil
 import socket
+import ssl
+import ssl
 import sqlite3
 import subprocess
 import sys
 import tarfile
 import tempfile
+import http.client
 import threading
 import time
+import zipfile
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -79,8 +83,10 @@ CONFIG_AWARE_BASELINE_PACKAGE_JSON = """{
 """
 
 CONFIG_AWARE_BASELINE_TSCONFIG = """{
-  \"compilerOptions\": {
-    \"baseUrl\": \".\",
+        range_prompt_start = reserve_then_release_port()
+        range_prompt_end = reserve_then_release_port()
+        range_yes_start = reserve_then_release_port()
+        range_yes_end = reserve_then_release_port()
     \"paths\": {
       \"@/*\": [\"./*\"]
     }
@@ -118,21 +124,44 @@ ENGINES_CONFIG_OPTOUT_BASELINE_PACKAGE_JSON = """{
 }
 """
 
-WORKSPACE_TARGETING_ROOT_BASELINE_PACKAGE_JSON = (
-    WORKSPACE_TARGETING_FIXTURE / "package.json"
-).read_text(encoding="utf-8")
+WORKSPACE_TARGETING_ROOT_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"workspace-targeting-root\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"workspaces\": [
+        \"apps/*\",
+        \"packages/*\"
+    ],
+    \"dependencies\": {}
+}
+"""
 
-WORKSPACE_TARGETING_WEB_BASELINE_PACKAGE_JSON = (
-    WORKSPACE_TARGETING_FIXTURE / "apps" / "web" / "package.json"
-).read_text(encoding="utf-8")
+WORKSPACE_TARGETING_WEB_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"@smoke/target-web\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"dependencies\": {
+        \"@smoke/target-core\": \"workspace:*\"
+    }
+}
+"""
 
-WORKSPACE_TARGETING_DOCS_BASELINE_PACKAGE_JSON = (
-    WORKSPACE_TARGETING_FIXTURE / "apps" / "docs" / "package.json"
-).read_text(encoding="utf-8")
+WORKSPACE_TARGETING_DOCS_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"@smoke/target-docs\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"dependencies\": {
+        \"@smoke/target-core\": \"workspace:*\"
+    }
+}
+"""
 
-WORKSPACE_TARGETING_CORE_BASELINE_PACKAGE_JSON = (
-    WORKSPACE_TARGETING_FIXTURE / "packages" / "core" / "package.json"
-).read_text(encoding="utf-8")
+WORKSPACE_TARGETING_CORE_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"@smoke/target-core\",
+    \"private\": true,
+    \"version\": \"0.0.0\"
+}
+"""
 
 SAVE_POLICY_DEFAULT_BASELINE_PACKAGE_JSON = """{
     \"name\": \"save-policy-default\",
@@ -555,6 +584,43 @@ server.listen(port, \"127.0.0.1\", () => {
 })
 """
 
+DEV_LOCAL_DOMAINS_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"dev-local-domains-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\"
+}
+"""
+
+DEV_LOCAL_DOMAINS_SERVER_SCRIPT = """const fs = require(\"node:fs\")
+const http = require(\"node:http\")
+
+fs.writeFileSync(
+    \"env-observed.json\",
+    `${JSON.stringify(
+        {
+            nodeExtraCaCerts: process.env.NODE_EXTRA_CA_CERTS || null,
+            sslCertFile: process.env.SSL_CERT_FILE || null,
+            sslKeyFile: process.env.SSL_KEY_FILE || null,
+            port: process.env.PORT || null,
+        },
+        null,
+        2,
+    )}\n`,
+    \"utf8\",
+)
+
+const server = http.createServer((_request, response) => {
+    response.writeHead(200, { \"content-type\": \"text/plain\" })
+    response.end(\"ok\")
+})
+
+server.listen(process.env.PORT, \"127.0.0.1\", () => {
+    setTimeout(() => {
+        server.close(() => process.exit(0))
+    }, 8000)
+})
+"""
+
 DEV_ORCHESTRATION_BASELINE_PACKAGE_JSON = """{
     \"name\": \"dev-orchestration-smoke\",
     \"private\": true,
@@ -748,6 +814,84 @@ PORTS_COMMAND_BASELINE_PACKAGE_JSON = """{
     \"private\": true,
     \"version\": \"0.0.0\"
 }
+"""
+
+PROXY_COMMAND_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"proxy-command-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"scripts\": {
+        \"dev\": \"node proxy-dev.cjs\"
+    }
+}
+"""
+
+PROXY_COMMAND_BASELINE_LPM_JSON = """{
+    \"proxy\": {
+        \"host\": \"app.localhost\"
+    }
+}
+"""
+
+HOSTS_COMMAND_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"hosts-command-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\"
+}
+"""
+
+PROXY_COMMAND_BASELINE_SCRIPT = """#!/usr/bin/env node
+
+const fs = require(\"node:fs\")
+const http = require(\"node:http\")
+const path = require(\"node:path\")
+
+const portIndex = process.argv.indexOf(\"--port\")
+if (portIndex === -1 || !process.argv[portIndex + 1]) {
+    console.error(\"missing --port\")
+    process.exit(1)
+}
+
+const port = Number(process.argv[portIndex + 1])
+if (!Number.isFinite(port) || port <= 0) {
+    console.error(`invalid --port value: ${process.argv[portIndex + 1] ?? \"\"}`)
+    process.exit(1)
+}
+
+const envObservedPath = path.join(process.cwd(), \"env-observed.json\")
+fs.writeFileSync(
+    envObservedPath,
+    JSON.stringify(
+        {
+            port: String(port),
+            nodeExtraCaCerts: process.env.NODE_EXTRA_CA_CERTS ?? null,
+            sslCertFile: process.env.SSL_CERT_FILE ?? null,
+            sslKeyFile: process.env.SSL_KEY_FILE ?? null,
+        },
+        null,
+        2,
+    ) + \"\\n\",
+    \"utf8\",
+)
+
+const server = http.createServer((request, response) => {
+    const chunks = []
+    request.on(\"data\", chunk => chunks.push(chunk))
+    request.on(\"end\", () => {
+        const body = Buffer.concat(chunks).toString(\"utf8\")
+        response.setHeader(\"Content-Type\", \"text/plain; charset=utf-8\")
+        response.end(
+            `${request.method} ${request.url} ${body} host=${request.headers.host ?? \"\"} proto=${request.headers[\"x-forwarded-proto\"] ?? \"\"}`,
+        )
+    })
+})
+
+server.listen(port, \"127.0.0.1\", () => {
+    console.log(`ready:${port}`)
+    setTimeout(() => {
+        server.close(() => process.exit(0))
+    }, 8000)
+})
 """
 
 TUNNEL_COMMAND_BASELINE_PACKAGE_JSON = """{
@@ -1016,16 +1160,57 @@ class LocalRegistryRequestHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         content_length = int(self.headers.get("Content-Length", "0"))
+        body = b""
         if content_length > 0:
-            self.rfile.read(content_length)
-        self._serve_route(include_body=True)
+            body = self.rfile.read(content_length)
+        self._serve_route(include_body=True, request_body=body)
+
+    def do_PUT(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        body = b""
+        if content_length > 0:
+            body = self.rfile.read(content_length)
+        self._serve_route(include_body=True, request_body=body)
 
     def log_message(self, format: str, *args: object) -> None:
         return
 
-    def _serve_route(self, include_body: bool) -> None:
+    def _serve_route(self, include_body: bool, request_body: bytes = b"") -> None:
         path = unquote(self.path.split("?", 1)[0])
         self.server.request_log.append((self.command, path))
+        self.server.request_details.append(
+            {
+                "method": self.command,
+                "path": path,
+                "headers": {key.lower(): value for key, value in self.headers.items()},
+                "body": request_body,
+            }
+        )
+
+        if self.command == "PUT" and path.startswith("/api/registry/") and self.server.accept_publish_put:
+            body = json.dumps(
+                self.server.publish_response or {"success": True, "message": "Package published"},
+                separators=(",", ":"),
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if include_body:
+                self.wfile.write(body)
+            return
+
+        method_route = self.server.method_routes.get((self.command, path))
+        if method_route is not None:
+            status_code, content_type, body = method_route
+            self.send_response(status_code)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if include_body:
+                self.wfile.write(body)
+            return
+
         route = self.server.routes.get(path)
         if route is None:
             self.send_response(404)
@@ -1046,6 +1231,10 @@ class LocalRegistryServer(ThreadingHTTPServer):
         super().__init__(("127.0.0.1", 0), LocalRegistryRequestHandler)
         self.routes = routes
         self.request_log: list[tuple[str, str]] = []
+        self.request_details: list[dict[str, object]] = []
+        self.method_routes: dict[tuple[str, str], tuple[int, str, bytes]] = {}
+        self.accept_publish_put = False
+        self.publish_response: dict[str, object] | None = None
 
 
 class MockRegistry:
@@ -1056,17 +1245,30 @@ class MockRegistry:
         serve_proxy_metadata: bool = True,
         serve_npm_search: bool = False,
         token_create_response: dict[str, object] | None = None,
+        whoami_response: dict[str, object] | None = None,
+        revoke_token_response: dict[str, object] | None = None,
+        accept_publish_put: bool = False,
+        publish_response: dict[str, object] | None = None,
+        extra_routes: dict[str, tuple[str, bytes]] | None = None,
     ):
         self._packages = packages
         self._serve_proxy_metadata = serve_proxy_metadata
         self._serve_npm_search = serve_npm_search
         self._token_create_response = token_create_response
+        self._whoami_response = whoami_response
+        self._revoke_token_response = revoke_token_response
+        self._accept_publish_put = accept_publish_put
+        self._publish_response = publish_response
+        self._extra_routes = dict(extra_routes or {})
         self._server: LocalRegistryServer | None = None
         self._thread: threading.Thread | None = None
 
     def __enter__(self) -> MockRegistry:
         self._server = LocalRegistryServer({})
         self._server.routes = self._build_routes(self.registry_url)
+        self._server.method_routes = self._build_method_routes()
+        self._server.accept_publish_put = self._accept_publish_put
+        self._server.publish_response = self._publish_response
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         return self
@@ -1101,6 +1303,12 @@ class MockRegistry:
                 json.dumps(self._token_create_response, separators=(",", ":")).encode(
                     "utf-8"
                 ),
+            )
+
+        if self._whoami_response is not None:
+            routes["/api/registry/-/whoami"] = (
+                "application/json",
+                json.dumps(self._whoami_response, separators=(",", ":")).encode("utf-8"),
             )
 
         for package in self._packages:
@@ -1173,12 +1381,38 @@ class MockRegistry:
                 ),
             )
 
+        routes.update(self._extra_routes)
+
+        return routes
+
+    def _build_method_routes(self) -> dict[tuple[str, str], tuple[int, str, bytes]]:
+        routes: dict[tuple[str, str], tuple[int, str, bytes]] = {}
+        if self._revoke_token_response is not None:
+            routes[("POST", "/api/registry/tokens/revoke")] = (
+                200,
+                "application/json",
+                json.dumps(self._revoke_token_response, separators=(",", ":")).encode("utf-8"),
+            )
         return routes
 
     def requested_paths(self) -> list[str]:
         if self._server is None:
             raise SmokeFailure("mock registry request log accessed before startup")
         return [path for _, path in self._server.request_log]
+
+    def request_details(
+        self,
+        method: str | None = None,
+        path: str | None = None,
+    ) -> list[dict[str, object]]:
+        if self._server is None:
+            raise SmokeFailure("mock registry request details accessed before startup")
+        rows = list(self._server.request_details)
+        if method is not None:
+            rows = [row for row in rows if row.get("method") == method]
+        if path is not None:
+            rows = [row for row in rows if row.get("path") == path]
+        return rows
 
 
 class _RemoteCacheHTTPServer(ThreadingHTTPServer):
@@ -1232,10 +1466,12 @@ class _RemoteCacheRequestHandler(BaseHTTPRequestHandler):
             tag = self.server.download_tag_override
             if tag is None:
                 tag = self.server.artifact_tag
+            artifact_sha = hashlib.sha256(payload).hexdigest()
 
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             self.send_header("Content-Length", str(len(payload)))
+            self.send_header("x-artifact-sha", artifact_sha)
             if tag is not None:
                 self.send_header("x-artifact-tag", tag)
             self.end_headers()
@@ -1384,13 +1620,36 @@ def log(message: str) -> None:
     print(f"[smoke] {message}", flush=True)
 
 
+def smoke_home_path(home_root: str | Path) -> str:
+    return str(Path(home_root) / ".lpm")
+
+
+def smoke_home_env(home_root: str | Path, **extra: str) -> dict[str, str]:
+    env = {
+        "HOME": str(home_root),
+        "LPM_HOME": smoke_home_path(home_root),
+    }
+    env.update(extra)
+    return env
+
+
+def home_root_for_lpm_home(lpm_home: str | Path) -> str:
+    lpm_home_path = Path(lpm_home)
+    if lpm_home_path.name == ".lpm":
+        return str(lpm_home_path.parent)
+    return str(lpm_home_path)
+
+
 def merged_env(extra: dict[str, str] | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env.update(DEFAULT_ENV)
     if extra:
-        env.update(extra)
-        if "LPM_HOME" in extra and "HOME" not in extra:
-            env["HOME"] = extra["LPM_HOME"]
+        normalized = dict(extra)
+        if "HOME" not in normalized and "LPM_HOME" in normalized:
+            normalized["HOME"] = home_root_for_lpm_home(normalized["LPM_HOME"])
+        if "LPM_HOME" not in normalized and "HOME" in normalized:
+            normalized["LPM_HOME"] = smoke_home_path(normalized["HOME"])
+        env.update(normalized)
     return env
 
 
@@ -1398,12 +1657,12 @@ def merged_env(extra: dict[str, str] | None = None) -> dict[str, str]:
 def isolated_default_smoke_home() -> Path:
     previous_home = os.environ.get("HOME")
     previous_lpm_home = os.environ.get("LPM_HOME")
-    lpm_home = Path(tempfile.mkdtemp(prefix="lpm-smoke-default-home-"))
+    home_root = Path(tempfile.mkdtemp(prefix="lpm-smoke-default-home-"))
 
-    os.environ["HOME"] = str(lpm_home)
-    os.environ["LPM_HOME"] = str(lpm_home)
+    os.environ["HOME"] = str(home_root)
+    os.environ["LPM_HOME"] = smoke_home_path(home_root)
     try:
-        yield lpm_home
+        yield home_root
     finally:
         if previous_home is None:
             os.environ.pop("HOME", None)
@@ -1418,7 +1677,7 @@ def isolated_default_smoke_home() -> Path:
         cleanup_error: OSError | None = None
         for _ in range(10):
             try:
-                shutil.rmtree(lpm_home)
+                shutil.rmtree(home_root)
                 cleanup_error = None
                 break
             except FileNotFoundError:
@@ -1430,7 +1689,7 @@ def isolated_default_smoke_home() -> Path:
 
         if cleanup_error is not None:
             raise SmokeFailure(
-                f"failed to clean isolated smoke home {lpm_home}: {cleanup_error}"
+                f"failed to clean isolated smoke home {home_root}: {cleanup_error}"
             )
 
 
@@ -1644,6 +1903,42 @@ def seed_refresh_backed_session(
             access_token,
             refresh_token,
             expires_at,
+        ],
+        extra_env=cargo_env,
+    )
+
+
+def seed_access_session(
+    auth_env: dict[str, str],
+    registry_url: str,
+    access_token: str,
+) -> None:
+    cargo_env = dict(auth_env)
+    if "CARGO_HOME" not in cargo_env:
+        if REAL_CARGO_HOME:
+            cargo_env["CARGO_HOME"] = REAL_CARGO_HOME
+        elif REAL_HOME:
+            cargo_env["CARGO_HOME"] = str(Path(REAL_HOME) / ".cargo")
+    if "RUSTUP_HOME" not in cargo_env:
+        if REAL_RUSTUP_HOME:
+            cargo_env["RUSTUP_HOME"] = REAL_RUSTUP_HOME
+        elif REAL_HOME:
+            cargo_env["RUSTUP_HOME"] = str(Path(REAL_HOME) / ".rustup")
+
+    run_command(
+        "seed access session",
+        RUST_CLIENT_ROOT,
+        [
+            "cargo",
+            "run",
+            "--quiet",
+            "-p",
+            "lpm-auth",
+            "--example",
+            "seed_access_session",
+            "--",
+            registry_url,
+            access_token,
         ],
         extra_env=cargo_env,
     )
@@ -2431,6 +2726,28 @@ def reset_ports_fixture() -> Path:
     )
 
 
+def reset_proxy_fixture() -> Path:
+    fixture = ROOT / "install" / "proxy" / "basic"
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={
+            "package.json": PROXY_COMMAND_BASELINE_PACKAGE_JSON,
+            "lpm.json": PROXY_COMMAND_BASELINE_LPM_JSON,
+            "proxy-dev.cjs": PROXY_COMMAND_BASELINE_SCRIPT,
+        },
+        extra_delete=["env-observed.json"],
+    )
+
+
+def reset_hosts_fixture() -> Path:
+    fixture = ROOT / "install" / "hosts" / "basic"
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={"package.json": HOSTS_COMMAND_BASELINE_PACKAGE_JSON},
+        extra_delete=["hosts"],
+    )
+
+
 def reset_tunnel_fixture() -> Path:
     fixture = ROOT / "install" / "tunnel" / "basic"
     return reset_single_project_fixture(
@@ -2784,8 +3101,10 @@ def seed_cache_prune_entry(
     version: str,
     graph_key_digest_hex: str,
     object_segment: str,
+    source_sri: str | None = None,
     last_referenced_at: str,
 ) -> tuple[Path, Path]:
+    source_sri_value = source_sri or object_segment
     link_root = Path(lpm_home) / "store" / "v2" / "links" / entry_name
     object_dir = Path(lpm_home) / "store" / "v2" / "objects" / object_segment
     write_package_json(
@@ -2803,14 +3122,14 @@ def seed_cache_prune_entry(
             "version": version,
         },
     )
-    write_bytes(object_dir / ".integrity", object_segment.encode("utf-8"))
+    write_bytes(object_dir / ".integrity", source_sri_value.encode("utf-8"))
     write_bytes(object_dir / "marker.txt", f"{package_name}@{version}\n".encode("utf-8"))
     sidecar = {
         "schema": 1,
         "graph_key": entry_name,
         "name": package_name,
         "version": version,
-        "source_sri": object_segment,
+        "source_sri": source_sri_value,
         "object_path": f"objects/{object_segment}",
         "graph_key_digest_hex": graph_key_digest_hex,
         "deps": [],
@@ -3192,7 +3511,12 @@ def scenario_install_config_aware() -> None:
         ],
     )
 
-    require_contains(output, "Added @lpm-registry/ex-source@", "install/config-aware add output")
+    require_contains(
+        output,
+        "Downloading source package @lpm-registry/ex-source@",
+        "install/config-aware add output package banner",
+    )
+    require_contains(output, "Done · added ", "install/config-aware add output completion")
     require_exists(fixture / "components" / "button" / "index.js")
     require_exists(fixture / "components" / "dialog" / "index.js")
     require_exists(fixture / "components" / "styles" / "config.js")
@@ -3231,10 +3555,10 @@ def scenario_install_remove() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_source_delivery_fixture()
         write_registry_npmrc(fixture, registry.registry_url)
-        scenario_env = {"LPM_HOME": lpm_home, "LPM_NPM_ROUTE": "proxy"}
+        scenario_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
 
         add_result = run_command_result(
             "install/source-delivery add manifest-backed source package",
@@ -3661,12 +3985,12 @@ def scenario_install_upgrade() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_upgrade_fixture()
         seed_registry_lockfile(fixture, package_name, "1.0.0", "https://registry.npmjs.org")
         seed_installed_package(fixture, package_name, "1.0.0")
 
-        scenario_env = {"LPM_HOME": lpm_home, "LPM_NPM_ROUTE": "proxy"}
+        scenario_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
 
         dry_run_result = run_command_result(
             "install/upgrade dry-run npm candidate",
@@ -3775,7 +4099,7 @@ def scenario_install_outdated() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_outdated_fixture()
         seed_registry_lockfile_entries(
             fixture,
@@ -3787,7 +4111,7 @@ def scenario_install_outdated() -> None:
         seed_installed_package(fixture, runtime_package, "1.0.0")
         seed_installed_package(fixture, dev_package, "5.0.0")
 
-        scenario_env = {"LPM_HOME": lpm_home, "LPM_NPM_ROUTE": "proxy"}
+        scenario_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
         command_prefix = [
             str(LPM_BIN),
             "--registry",
@@ -3866,7 +4190,7 @@ def scenario_install_outdated_skipped_private() -> None:
 
     with MockRegistry([]) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_outdated_fixture()
         write_package_json(
             fixture / "package.json",
@@ -3883,7 +4207,7 @@ def scenario_install_outdated_skipped_private() -> None:
         )
         seed_installed_package(fixture, private_package, "2.1.3")
 
-        scenario_env = {"LPM_HOME": lpm_home, "LPM_NPM_ROUTE": "proxy"}
+        scenario_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
         command_prefix = [
             str(LPM_BIN),
             "--registry",
@@ -3992,10 +4316,10 @@ def scenario_install_read_only_routing() -> None:
         registry_packages,
         serve_proxy_metadata=False,
         serve_npm_search=True,
-    ) as registry, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+    ) as registry, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_read_only_routing_fixture()
         write_registry_npmrc(fixture, registry.registry_url)
-        scenario_env = {"LPM_HOME": lpm_home}
+        scenario_env = smoke_home_env(home_root)
         command_prefix = [
             str(LPM_BIN),
             "--registry",
@@ -4226,10 +4550,11 @@ def scenario_install_uninstall_global() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_global_install_fixture("basic")
         baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
-        registry_env = {"LPM_HOME": lpm_home, "LPM_NPM_ROUTE": "proxy"}
+        lpm_home = smoke_home_path(home_root)
+        registry_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
 
         run_command(
             "install/uninstall-global install package",
@@ -4314,8 +4639,8 @@ def scenario_install_save_policy() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
-        scenario_env = {"LPM_HOME": lpm_home}
+    ) as home_root:
+        scenario_env = smoke_home_env(home_root)
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -4531,8 +4856,8 @@ def scenario_install_peer_deps() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
-        scenario_env = {"LPM_HOME": lpm_home, "LPM_STORE_VERSION": "v2"}
+    ) as home_root:
+        scenario_env = smoke_home_env(home_root, LPM_STORE_VERSION="v2")
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -4768,8 +5093,8 @@ def scenario_install_catalog() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
-        scenario_env = {"LPM_HOME": lpm_home}
+    ) as home_root:
+        scenario_env = smoke_home_env(home_root)
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -4987,8 +5312,8 @@ def scenario_install_script_policy() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
-        scenario_env = {"LPM_HOME": lpm_home}
+    ) as home_root:
+        scenario_env = smoke_home_env(home_root)
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -5103,8 +5428,8 @@ def scenario_install_offline_integrity() -> None:
             "--no-security-summary",
         ]
 
-        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
-            scenario_env = {"LPM_HOME": lpm_home}
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
+            scenario_env = smoke_home_env(home_root)
 
             strict_fixture = reset_offline_integrity_fixture()
             write_package_json(
@@ -5178,7 +5503,7 @@ def scenario_install_offline_integrity() -> None:
                     "install/offline-integrity cold offline fails without store",
                     seeded_fixture,
                     [str(LPM_BIN), "install", "--offline", "--strict-integrity", *install_flags],
-                    extra_env={"LPM_HOME": cold_home},
+                    extra_env=smoke_home_env(cold_home),
                 )
             if not any(
                 needle in cold_output.lower()
@@ -5214,8 +5539,8 @@ def scenario_install_minimum_release_age() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
-        scenario_env = {"LPM_HOME": lpm_home}
+    ) as home_root:
+        scenario_env = smoke_home_env(home_root)
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -5374,12 +5699,13 @@ def scenario_install_security() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
-        scenario_env = {
-            "LPM_HOME": lpm_home,
-            "LPM_FORCE_FILE_AUTH": "1",
-            "LPM_FORCE_FILE_VAULT": "1",
-        }
+    ) as home_root:
+        lpm_home = smoke_home_path(home_root)
+        scenario_env = smoke_home_env(
+            home_root,
+            LPM_FORCE_FILE_AUTH="1",
+            LPM_FORCE_FILE_VAULT="1",
+        )
         audit_path = Path(lpm_home) / "security" / "audit.jsonl"
 
         status_fixture = reset_security_fixture("status")
@@ -5433,11 +5759,11 @@ def scenario_install_security() -> None:
             extra_env=scenario_env,
         )
         for needle, context in [
-            ("Security Floor", "header"),
-            ("approved-posture", "approved posture field"),
-            ("managed-policy", "managed policy field"),
-            ("Runtime Overrides", "runtime overrides header"),
-            ("Active Unlocks", "active unlocks header"),
+            ("effective floor", "header"),
+            ("approved posture", "approved posture field"),
+            ("managed policy", "managed policy field"),
+            ("runtime overrides", "runtime overrides header"),
+            ("active unlocks", "active unlocks header"),
         ]:
             require_contains(status_human, needle, f"install/security status human {context}")
 
@@ -5837,7 +6163,7 @@ def scenario_install_audit_after_install() -> None:
                 "install/audit-after-install default off",
                 default_fixture,
                 [str(LPM_BIN), "install", *install_flags],
-                extra_env={"LPM_HOME": default_home},
+                extra_env=smoke_home_env(default_home),
             )
             require_not_contains(
                 default_output,
@@ -5851,7 +6177,7 @@ def scenario_install_audit_after_install() -> None:
                 "install/audit-after-install cli flag",
                 flag_fixture,
                 [str(LPM_BIN), "install", "--audit-after-install", *install_flags],
-                extra_env={"LPM_HOME": flag_home},
+                extra_env=smoke_home_env(flag_home),
             )
             require_contains(
                 flag_output,
@@ -5870,7 +6196,10 @@ def scenario_install_audit_after_install() -> None:
                 "install/audit-after-install env on",
                 env_fixture,
                 [str(LPM_BIN), "install", *install_flags],
-                extra_env={"LPM_HOME": env_home, "LPM_AUDIT_AFTER_INSTALL": "1"},
+                extra_env=smoke_home_env(
+                    env_home,
+                    LPM_AUDIT_AFTER_INSTALL="1",
+                ),
             )
             require_contains(
                 env_output,
@@ -5884,7 +6213,10 @@ def scenario_install_audit_after_install() -> None:
                 "install/audit-after-install no-audit overrides env",
                 override_fixture,
                 [str(LPM_BIN), "install", "--no-audit-after-install", *install_flags],
-                extra_env={"LPM_HOME": override_home, "LPM_AUDIT_AFTER_INSTALL": "1"},
+                extra_env=smoke_home_env(
+                    override_home,
+                    LPM_AUDIT_AFTER_INSTALL="1",
+                ),
             )
             require_not_contains(
                 override_output,
@@ -5894,7 +6226,7 @@ def scenario_install_audit_after_install() -> None:
 
         with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as config_home:
             config_fixture = prepare_fixture()
-            config_dir = Path(config_home) / ".lpm"
+            config_dir = Path(smoke_home_path(config_home))
             config_dir.mkdir(parents=True, exist_ok=True)
             (config_dir / "config.toml").write_text(
                 "audit-after-install = true\n",
@@ -5904,7 +6236,7 @@ def scenario_install_audit_after_install() -> None:
                 "install/audit-after-install config on",
                 config_fixture,
                 [str(LPM_BIN), "install", *install_flags],
-                extra_env={"LPM_HOME": config_home, "HOME": config_home},
+                extra_env=smoke_home_env(config_home),
             )
             require_contains(
                 config_output,
@@ -5924,7 +6256,7 @@ def scenario_install_audit_after_install() -> None:
                     "--audit-after-install",
                     *install_flags,
                 ],
-                extra_env={"LPM_HOME": json_home},
+                extra_env=smoke_home_env(json_home),
             )
             if json_result.returncode != 0:
                 raise SmokeFailure(
@@ -5965,11 +6297,11 @@ def scenario_install_audit_after_install() -> None:
                     "--audit-after-install",
                     *install_flags,
                 ],
-                extra_env={
-                    "LPM_HOME": failure_home,
-                    "LPM_TEST_MODE": "1",
-                    "LPM_TEST_AUDIT_AFTER_INSTALL_FAIL": "1",
-                },
+                extra_env=smoke_home_env(
+                    failure_home,
+                    LPM_TEST_MODE="1",
+                    LPM_TEST_AUDIT_AFTER_INSTALL_FAIL="1",
+                ),
             )
             if failure_result.returncode != 0:
                 raise SmokeFailure(
@@ -6036,10 +6368,10 @@ def scenario_install_audit_command() -> None:
 
         with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
             prefix="lpm-smoke-home-"
-        ) as lpm_home:
+        ) as home_root:
             fixture = reset_audit_command_fixture()
             write_registry_npmrc(fixture, registry.registry_url)
-            scenario_env = {"LPM_HOME": lpm_home, "LPM_OSV_URL": osv_url}
+            scenario_env = smoke_home_env(home_root, LPM_OSV_URL=osv_url)
             install_flags = [
                 "--no-skills",
                 "--no-editor-setup",
@@ -6179,10 +6511,10 @@ def scenario_install_query_command() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_query_command_fixture()
         write_registry_npmrc(fixture, registry.registry_url)
-        scenario_env = {"LPM_HOME": lpm_home}
+        scenario_env = smoke_home_env(home_root)
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -6280,10 +6612,10 @@ def scenario_install_approve_scripts_command() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_approve_scripts_fixture()
         write_registry_npmrc(fixture, registry.registry_url)
-        scenario_env = {"LPM_HOME": lpm_home}
+        scenario_env = smoke_home_env(home_root)
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -6442,10 +6774,10 @@ def scenario_install_trust_command() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_trust_command_fixture()
         write_registry_npmrc(fixture, registry.registry_url)
-        scenario_env = {"LPM_HOME": lpm_home}
+        scenario_env = smoke_home_env(home_root)
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -6666,10 +6998,10 @@ def scenario_install_rebuild_command() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_rebuild_command_fixture()
         write_registry_npmrc(fixture, registry.registry_url)
-        scenario_env = {"LPM_HOME": lpm_home}
+        scenario_env = smoke_home_env(home_root)
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -6747,10 +7079,10 @@ def scenario_install_patch_command() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_patch_command_fixture()
         write_registry_npmrc(fixture, registry.registry_url)
-        scenario_env = {"LPM_HOME": lpm_home}
+        scenario_env = smoke_home_env(home_root)
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -7056,10 +7388,10 @@ def scenario_install_patch_scoped_command() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_patch_scoped_command_fixture()
         write_registry_npmrc(fixture, registry.registry_url)
-        scenario_env = {"LPM_HOME": lpm_home}
+        scenario_env = smoke_home_env(home_root)
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -7188,10 +7520,10 @@ def scenario_install_patch_binary_command() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_patch_binary_command_fixture()
         write_registry_npmrc(fixture, registry.registry_url)
-        scenario_env = {"LPM_HOME": lpm_home}
+        scenario_env = smoke_home_env(home_root)
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -7252,7 +7584,7 @@ def scenario_install_patch_binary_command() -> None:
 
 
 def scenario_install_hidden_scripts() -> None:
-    with tempfile.TemporaryDirectory(prefix="lpm-hidden-scripts-home-") as lpm_home, tempfile.TemporaryDirectory(
+    with tempfile.TemporaryDirectory(prefix="lpm-hidden-scripts-home-") as home_root, tempfile.TemporaryDirectory(
         prefix="lpm-hidden-scripts-project-"
     ) as project_dir:
         project_path = Path(project_dir)
@@ -7295,10 +7627,7 @@ def scenario_install_hidden_scripts() -> None:
             encoding="utf-8",
         )
 
-        scenario_env = {
-            "LPM_HOME": lpm_home,
-            "LPM_TEST_BIN": str(LPM_BIN),
-        }
+        scenario_env = smoke_home_env(home_root, LPM_TEST_BIN=str(LPM_BIN))
 
         direct_run_output = run_command_expect_failure(
             "install/hidden-scripts direct run rejected",
@@ -7465,7 +7794,7 @@ def scenario_install_sbom_command() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-sbom-home-"
-    ) as lpm_home, tempfile.TemporaryDirectory(prefix="lpm-sbom-project-") as project_dir:
+    ) as home_root, tempfile.TemporaryDirectory(prefix="lpm-sbom-project-") as project_dir:
         project_path = Path(project_dir)
         write_package_json(
             project_path / "package.json",
@@ -7497,7 +7826,7 @@ def scenario_install_sbom_command() -> None:
         patch_path.parent.mkdir(parents=True, exist_ok=True)
         patch_path.write_text(patch_text, encoding="utf-8")
 
-        scenario_env = {"LPM_HOME": lpm_home}
+        scenario_env = smoke_home_env(home_root)
 
         cyclonedx_result = run_command_result(
             "install/sbom cyclonedx local-first stdout",
@@ -7637,10 +7966,11 @@ def scenario_install_download_command() -> None:
     with MockRegistry(
         registry_packages,
         serve_proxy_metadata=False,
-    ) as registry, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+    ) as registry, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_download_command_fixture()
         write_registry_npmrc(fixture, registry.registry_url)
-        scenario_env = {"LPM_HOME": lpm_home}
+        lpm_home = smoke_home_path(home_root)
+        scenario_env = smoke_home_env(home_root)
         command_prefix = [str(LPM_BIN), "--registry", registry.registry_url, "--insecure"]
         baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
 
@@ -7741,13 +8071,14 @@ def scenario_install_resolve_command() -> None:
     with MockRegistry(
         registry_packages,
         serve_proxy_metadata=False,
-    ) as registry, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+    ) as registry, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_resolve_command_fixture()
         (fixture / ".npmrc").write_text(
             f"registry={registry.registry_url}\n@smoke:registry={registry.registry_url}\n",
             encoding="utf-8",
         )
-        scenario_env = {"LPM_HOME": lpm_home}
+        lpm_home = smoke_home_path(home_root)
+        scenario_env = smoke_home_env(home_root)
         command_prefix = [str(LPM_BIN), "--registry", registry.registry_url, "--insecure"]
         baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
 
@@ -7811,9 +8142,10 @@ def scenario_install_resolve_command() -> None:
 
 
 def scenario_install_migrate_npm() -> None:
-    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_migrate_npm_fixture()
-        scenario_env = {"LPM_HOME": lpm_home}
+        lpm_home = smoke_home_path(home_root)
+        scenario_env = smoke_home_env(home_root)
         baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
         baseline_package_lock = (fixture / "package-lock.json").read_text(encoding="utf-8")
 
@@ -7915,9 +8247,10 @@ def scenario_install_migrate_npm() -> None:
 
 
 def scenario_install_migrate_pnpm() -> None:
-    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_migrate_pnpm_fixture()
-        scenario_env = {"LPM_HOME": lpm_home}
+        lpm_home = smoke_home_path(home_root)
+        scenario_env = smoke_home_env(home_root)
         baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
         baseline_pnpm_lock = (fixture / "pnpm-lock.yaml").read_text(encoding="utf-8")
 
@@ -7975,9 +8308,10 @@ def scenario_install_migrate_pnpm() -> None:
 
 
 def scenario_install_migrate_pnpm_patches() -> None:
-    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_migrate_pnpm_patches_fixture()
-        scenario_env = {"LPM_HOME": lpm_home}
+        lpm_home = smoke_home_path(home_root)
+        scenario_env = smoke_home_env(home_root)
         baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
         baseline_pnpm_lock = (fixture / "pnpm-lock.yaml").read_text(encoding="utf-8")
         baseline_patch = (fixture / "patches" / "ms@2.1.3.patch").read_text(encoding="utf-8")
@@ -8046,9 +8380,10 @@ def scenario_install_migrate_pnpm_patches() -> None:
 
 
 def scenario_install_migrate_bun() -> None:
-    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_migrate_bun_fixture()
-        scenario_env = {"LPM_HOME": lpm_home}
+        lpm_home = smoke_home_path(home_root)
+        scenario_env = smoke_home_env(home_root)
         baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
         baseline_bun_lock = (fixture / "bun.lock").read_text(encoding="utf-8")
 
@@ -8089,9 +8424,10 @@ def scenario_install_migrate_bun() -> None:
 
 
 def scenario_install_migrate_yarn() -> None:
-    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_migrate_yarn_fixture()
-        scenario_env = {"LPM_HOME": lpm_home}
+        lpm_home = smoke_home_path(home_root)
+        scenario_env = smoke_home_env(home_root)
         baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
         baseline_yarn_lock = (fixture / "yarn.lock").read_text(encoding="utf-8")
 
@@ -8198,7 +8534,7 @@ process.stdout.write(\"remote-build-output\\n\")
             "LPM_REMOTE_CACHE_SIGNATURE_KEY": "remote-cache-signature-key",
         }
 
-        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
             with tempfile.TemporaryDirectory(prefix="lpm-remote-cache-project-") as project_dir:
                 project_path = Path(project_dir)
                 write_remote_cache_project(
@@ -8211,11 +8547,9 @@ process.stdout.write(\"remote-build-output\\n\")
                         "signature": True,
                     },
                 )
+                lpm_home = smoke_home_path(home_root)
 
-                scenario_env = {
-                    "LPM_HOME": lpm_home,
-                    **signature_env,
-                }
+                scenario_env = smoke_home_env(home_root, **signature_env)
 
                 first_run = run_command_result(
                     "install/remote-cache initial upload",
@@ -8437,11 +8771,11 @@ process.stdout.write(\"remote-build-output\\n\")
                     "install/remote-cache read-only upload skip",
                     project_path,
                     [str(LPM_BIN), "run", "build"],
-                    extra_env={
-                        "LPM_HOME": read_only_home,
-                        "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
-                        "LPM_REMOTE_CACHE_READ_ONLY": "1",
-                    },
+                    extra_env=smoke_home_env(
+                        read_only_home,
+                        **signature_env,
+                        LPM_REMOTE_CACHE_READ_ONLY="1",
+                    ),
                 )
                 if read_only_result.returncode != 0:
                     raise SmokeFailure(
@@ -8482,10 +8816,7 @@ process.stdout.write(\"remote-build-output\\n\")
                     encoding="utf-8",
                 )
 
-                secret_env = {
-                    "LPM_HOME": secret_home,
-                    "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
-                }
+                secret_env = smoke_home_env(secret_home, **signature_env)
 
                 secret_first_run = run_command_result(
                     "install/remote-cache secret env upload block",
@@ -8557,10 +8888,10 @@ process.stdout.write(\"remote-build-output\\n\")
                     "install/remote-cache env include allow",
                     project_path,
                     [str(LPM_BIN), "run", "build"],
-                    extra_env={
-                        "LPM_HOME": include_home,
-                        "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
-                    },
+                    extra_env=smoke_home_env(
+                        include_home,
+                        **signature_env,
+                    ),
                 )
                 if include_result.returncode != 0:
                     raise SmokeFailure(
@@ -8605,10 +8936,10 @@ process.stdout.write(\"remote-build-output\\n\")
                     "install/remote-cache env exclude precedence",
                     project_path,
                     [str(LPM_BIN), "run", "build"],
-                    extra_env={
-                        "LPM_HOME": exclude_home,
-                        "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
-                    },
+                    extra_env=smoke_home_env(
+                        exclude_home,
+                        **signature_env,
+                    ),
                 )
                 if exclude_result.returncode != 0:
                     raise SmokeFailure(
@@ -8652,10 +8983,10 @@ process.stdout.write(\"remote-build-output\\n\")
                     "install/remote-cache env allowSecrets",
                     project_path,
                     [str(LPM_BIN), "run", "build"],
-                    extra_env={
-                        "LPM_HOME": allow_secrets_home,
-                        "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
-                    },
+                    extra_env=smoke_home_env(
+                        allow_secrets_home,
+                        **signature_env,
+                    ),
                 )
                 if allow_secrets_result.returncode != 0:
                     raise SmokeFailure(
@@ -8696,10 +9027,10 @@ process.stdout.write(\"remote-build-output\\n\")
                     "install/remote-cache upload forbidden fallback",
                     project_path,
                     [str(LPM_BIN), "run", "build"],
-                    extra_env={
-                        "LPM_HOME": forbidden_upload_home,
-                        "LPM_REMOTE_CACHE_TOKEN": "remote-cache-token",
-                    },
+                    extra_env=smoke_home_env(
+                        forbidden_upload_home,
+                        **signature_env,
+                    ),
                 )
                 if forbidden_upload_result.returncode != 0:
                     raise SmokeFailure(
@@ -8742,10 +9073,11 @@ process.stdout.write(\"remote-build-output\\n\")
                     "install/remote-cache env disable override",
                     project_path,
                     [str(LPM_BIN), "run", "build"],
-                    extra_env={
-                        "LPM_HOME": disabled_home,
-                        "LPM_REMOTE_CACHE": "0",
-                    },
+                    extra_env=smoke_home_env(
+                        disabled_home,
+                        **signature_env,
+                        LPM_REMOTE_CACHE="0",
+                    ),
                 )
                 if disabled_result.returncode != 0:
                     raise SmokeFailure(
@@ -8759,9 +9091,10 @@ process.stdout.write(\"remote-build-output\\n\")
 
 
 def scenario_install_cache_command() -> None:
-    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_cache_command_fixture()
-        scenario_env = {"LPM_HOME": lpm_home}
+        lpm_home = smoke_home_path(home_root)
+        scenario_env = smoke_home_env(home_root)
 
         cache_root = Path(lpm_home) / "cache"
         metadata_file = cache_root / "metadata" / "pkg-meta.json"
@@ -8869,12 +9202,10 @@ def scenario_install_cache_command() -> None:
 
 
 def scenario_install_cache_prune() -> None:
-    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_cache_prune_fixture()
-        scenario_env = {
-            "LPM_HOME": lpm_home,
-            "LPM_STORE_VERSION": "v2",
-        }
+        lpm_home = smoke_home_path(home_root)
+        scenario_env = smoke_home_env(home_root, LPM_STORE_VERSION="v2")
 
         degraded_result = run_command_result(
             "install/cache-prune degraded dry-run json",
@@ -9129,10 +9460,14 @@ def scenario_install_cache_prune() -> None:
 
 
 def scenario_install_store_command() -> None:
-    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as lpm_home:
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_store_fixture()
-        scenario_env = {"LPM_HOME": lpm_home}
+        lpm_home = smoke_home_path(home_root)
+        scenario_env = smoke_home_env(home_root)
         store_root = Path(lpm_home) / "store"
+        store_v2_digest = hashlib.sha512(b"store-v2-pkg@2.0.0").digest()
+        store_v2_integrity = f"sha512-{base64.b64encode(store_v2_digest).decode('ascii')}"
+        store_v2_object_segment = f"sha512-{store_v2_digest.hex()}"
 
         path_result = run_command_result(
             "install/store path json",
@@ -9170,7 +9505,8 @@ def scenario_install_store_command() -> None:
             package_name="store-v2-pkg",
             version="2.0.0",
             graph_key_digest_hex="4" * 64,
-            object_segment="sha512-store-v2-match",
+            object_segment=store_v2_object_segment,
+            source_sri=store_v2_integrity,
             last_referenced_at=iso8601_n_secs_ago(3600),
         )
         seed_store_verify_lockfile(
@@ -9178,7 +9514,7 @@ def scenario_install_store_command() -> None:
             [
                 ("store-security-pkg", "1.0.0", "sha512-store-security-match"),
                 ("store-integrity-pkg", "1.0.0", "sha512-store-integrity-expected"),
-                ("store-v2-pkg", "2.0.0", "sha512-store-v2-match"),
+                ("store-v2-pkg", "2.0.0", store_v2_integrity),
             ],
         )
 
@@ -9340,11 +9676,7 @@ def scenario_install_graph_command() -> None:
     fixture = reset_graph_fixture().resolve()
 
     with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
-        scenario_env = {
-            "HOME": home_root,
-            "LPM_HOME": str(Path(home_root) / ".lpm"),
-            "LPM_FORCE_FILE_AUTH": "1",
-        }
+        scenario_env = smoke_home_env(home_root, LPM_FORCE_FILE_AUTH="1")
 
         tree_output = run_command(
             "install/graph default tree",
@@ -9702,11 +10034,7 @@ def scenario_install_dev_command() -> None:
     dev_port = reserve_then_release_port()
 
     with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
-        scenario_env = {
-            "HOME": home_root,
-            "LPM_HOME": str(Path(home_root) / ".lpm"),
-            "LPM_FORCE_FILE_AUTH": "1",
-        }
+        scenario_env = smoke_home_env(home_root, LPM_FORCE_FILE_AUTH="1")
 
         common_args = [
             str(LPM_BIN),
@@ -9814,14 +10142,13 @@ def scenario_install_dev_command() -> None:
 
         with tempfile.TemporaryDirectory(prefix="lpm-smoke-dev-https-fail-") as https_failure_home:
             https_failure_home_path = Path(https_failure_home)
-            https_failure_env = {
-                "HOME": https_failure_home,
-                "LPM_HOME": str(https_failure_home_path / ".lpm"),
-                "LPM_FORCE_FILE_AUTH": "1",
-                "LPM_CERT_TEST_TRUST_STORE_DIR": str(
+            https_failure_env = smoke_home_env(
+                https_failure_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_CERT_TEST_TRUST_STORE_DIR=str(
                     https_failure_home_path / "test-trust-store"
                 ),
-            }
+            )
 
             https_failure_args = [
                 str(LPM_BIN),
@@ -9884,14 +10211,13 @@ def scenario_install_dev_command() -> None:
 
         with tempfile.TemporaryDirectory(prefix="lpm-smoke-dev-https-success-") as https_success_home:
             https_success_home_path = Path(https_success_home)
-            https_success_env = {
-                "HOME": https_success_home,
-                "LPM_HOME": str(https_success_home_path / ".lpm"),
-                "LPM_FORCE_FILE_AUTH": "1",
-                "LPM_CERT_TEST_TRUST_STORE_DIR": str(
+            https_success_env = smoke_home_env(
+                https_success_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_CERT_TEST_TRUST_STORE_DIR=str(
                     https_success_home_path / "test-trust-store"
                 ),
-            }
+            )
 
             https_success_args = [
                 str(LPM_BIN),
@@ -10029,13 +10355,12 @@ def scenario_install_dev_command() -> None:
         with tempfile.TemporaryDirectory(prefix="lpm-smoke-dev-tunnel-") as tunnel_home:
             tunnel_home_path = Path(tunnel_home)
             tunnel_registry_url = f"http://127.0.0.1:{tunnel_registry_port}"
-            tunnel_env = {
-                "HOME": tunnel_home,
-                "LPM_HOME": str(tunnel_home_path / ".lpm"),
-                "LPM_FORCE_FILE_AUTH": "1",
-                "LPM_TEST_FAST_SCRYPT": "1",
-                "LPM_TUNNEL_RELAY": f"ws://127.0.0.1:{tunnel_relay_port}/connect",
-            }
+            tunnel_env = smoke_home_env(
+                tunnel_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_TEST_FAST_SCRYPT="1",
+                LPM_TUNNEL_RELAY=f"ws://127.0.0.1:{tunnel_relay_port}/connect",
+            )
             seed_refresh_backed_session(
                 tunnel_env,
                 tunnel_registry_url,
@@ -10177,15 +10502,14 @@ def scenario_install_dev_command() -> None:
             tunnel_auth_registry_url = (
                 f"http://127.0.0.1:{tunnel_auth_registry_port}"
             )
-            tunnel_auth_env = {
-                "HOME": tunnel_auth_home,
-                "LPM_HOME": str(tunnel_auth_home_path / ".lpm"),
-                "LPM_FORCE_FILE_AUTH": "1",
-                "LPM_TEST_FAST_SCRYPT": "1",
-                "LPM_TUNNEL_RELAY": (
+            tunnel_auth_env = smoke_home_env(
+                tunnel_auth_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_TEST_FAST_SCRYPT="1",
+                LPM_TUNNEL_RELAY=(
                     f"ws://127.0.0.1:{tunnel_auth_relay_port}/connect"
                 ),
-            }
+            )
             seed_refresh_backed_session(
                 tunnel_auth_env,
                 tunnel_auth_registry_url,
@@ -10298,15 +10622,14 @@ def scenario_install_dev_command() -> None:
             tunnel_no_inspect_registry_url = (
                 f"http://127.0.0.1:{tunnel_no_inspect_registry_port}"
             )
-            tunnel_no_inspect_env = {
-                "HOME": tunnel_no_inspect_home,
-                "LPM_HOME": str(tunnel_no_inspect_home_path / ".lpm"),
-                "LPM_FORCE_FILE_AUTH": "1",
-                "LPM_TEST_FAST_SCRYPT": "1",
-                "LPM_TUNNEL_RELAY": (
+            tunnel_no_inspect_env = smoke_home_env(
+                tunnel_no_inspect_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_TEST_FAST_SCRYPT="1",
+                LPM_TUNNEL_RELAY=(
                     f"ws://127.0.0.1:{tunnel_no_inspect_relay_port}/connect"
                 ),
-            }
+            )
             seed_refresh_backed_session(
                 tunnel_no_inspect_env,
                 tunnel_no_inspect_registry_url,
@@ -10412,13 +10735,12 @@ def scenario_install_dev_command() -> None:
             tunnel_strict_registry_url = (
                 f"http://127.0.0.1:{tunnel_strict_registry_port}"
             )
-            tunnel_strict_env = {
-                "HOME": tunnel_strict_home,
-                "LPM_HOME": str(tunnel_strict_home_path / ".lpm"),
-                "LPM_FORCE_FILE_AUTH": "1",
-                "LPM_TEST_FAST_SCRYPT": "1",
-                "LPM_TUNNEL_RELAY": f"ws://127.0.0.1:{tunnel_strict_relay_port}/connect",
-            }
+            tunnel_strict_env = smoke_home_env(
+                tunnel_strict_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_TEST_FAST_SCRYPT="1",
+                LPM_TUNNEL_RELAY=f"ws://127.0.0.1:{tunnel_strict_relay_port}/connect",
+            )
             seed_refresh_backed_session(
                 tunnel_strict_env,
                 tunnel_strict_registry_url,
@@ -10586,16 +10908,739 @@ def scenario_install_dev_command() -> None:
             )
 
 
+def scenario_install_dev_local_domains_command() -> None:
+    if os.name == "nt":
+        log("install-dev-local-domains skipped on Windows")
+        return
+
+    def seed_local_domain_project(
+        project_dir: Path,
+        host: str,
+        *,
+        proxy_config: dict[str, object] | None = None,
+    ) -> None:
+        project_dir.mkdir(parents=True, exist_ok=True)
+        (project_dir / "package.json").write_text(
+            DEV_LOCAL_DOMAINS_BASELINE_PACKAGE_JSON,
+            encoding="utf-8",
+        )
+        (project_dir / "server.js").write_text(
+            DEV_LOCAL_DOMAINS_SERVER_SCRIPT,
+            encoding="utf-8",
+        )
+        lpm_json: dict[str, object] = {
+            "services": {
+                "web": {
+                    "command": "node server.js",
+                    "host": host,
+                }
+            }
+        }
+        if proxy_config is not None:
+            lpm_json["proxy"] = proxy_config
+        (project_dir / "lpm.json").write_text(
+            json.dumps(lpm_json, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def base_env(home_dir: Path, extra_env: dict[str, str] | None = None) -> dict[str, str]:
+        env = smoke_home_env(
+            home_dir,
+            LPM_CERT_TEST_TRUST_STORE_DIR=str(home_dir / "test-trust-store"),
+            LPM_FORCE_FILE_AUTH="1",
+        )
+        if extra_env:
+            env.update(extra_env)
+        return env
+
+    def run_json_envelope(
+        label: str,
+        cwd: Path,
+        args: list[str],
+        env: dict[str, str],
+        *,
+        require_clean_stderr: bool = False,
+    ) -> dict[str, object]:
+        result = run_command_result(label, cwd, [str(LPM_BIN), *args], extra_env=env)
+        if result.returncode != 0:
+            raise SmokeFailure(f"{label} failed with exit code {result.returncode}")
+        if require_clean_stderr and result.stderr:
+            raise SmokeFailure(f"{label}: expected stderr to stay empty")
+        return json.loads(result.stdout)
+
+    def poll_proxy_status(project_dir: Path, env: dict[str, str]) -> dict[str, object]:
+        result = subprocess.run(
+            [str(LPM_BIN), "--json", "proxy", "status"],
+            cwd=project_dir,
+            env=merged_env(env),
+            capture_output=True,
+            text=True,
+        )
+        if result.returncode != 0:
+            raise SmokeFailure(
+                "install/dev local domains proxy status failed with exit code "
+                f"{result.returncode}"
+            )
+        return json.loads(result.stdout)
+
+    def wait_for_proxy_route(
+        project_dir: Path,
+        env: dict[str, str],
+        host: str,
+        process: subprocess.Popen[str],
+        label: str,
+    ) -> dict[str, object]:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            status = poll_proxy_status(project_dir, env)
+            routes = status.get("routes") or []
+            route = next(
+                (
+                    row
+                    for row in routes
+                    if isinstance(row, dict) and row.get("host") == host
+                ),
+                None,
+            )
+            if isinstance(route, dict):
+                return route
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise SmokeFailure(
+                    f"{label}: lpm dev exited before proxy route {host!r} appeared"
+                    f"\nstdout: {stdout}\nstderr: {stderr}"
+                )
+            time.sleep(0.1)
+
+        if process.poll() is None:
+            process.kill()
+        stdout, stderr = process.communicate()
+        raise SmokeFailure(
+            f"{label}: proxy route {host!r} did not appear"
+            f"\nstdout: {stdout}\nstderr: {stderr}"
+        )
+
+    def wait_for_proxy_route_absent(
+        project_dir: Path,
+        env: dict[str, str],
+        host: str,
+        label: str,
+    ) -> None:
+        deadline = time.monotonic() + 10
+        while time.monotonic() < deadline:
+            status = poll_proxy_status(project_dir, env)
+            routes = status.get("routes") or []
+            if not any(
+                isinstance(route, dict) and route.get("host") == host
+                for route in routes
+            ):
+                return
+            time.sleep(0.1)
+        raise SmokeFailure(f"{label}: proxy route {host!r} did not disappear")
+
+    def stop_detached_proxy(project_dir: Path, env: dict[str, str], label: str) -> None:
+        envelope = run_json_envelope(
+            label,
+            project_dir,
+            ["--json", "proxy", "stop"],
+            env,
+            require_clean_stderr=True,
+        )
+        if envelope.get("stopped") is not True:
+            raise SmokeFailure(f"{label}: expected stopped=true")
+
+    def wait_for_proxy_tls_ok(project_dir: Path, env: dict[str, str], host: str, label: str) -> None:
+        deadline = time.monotonic() + 5
+        last_status: int | None = None
+        last_body: str | None = None
+        while time.monotonic() < deadline:
+            status = poll_proxy_status(project_dir, env)
+            tls_addr = status.get("tlsAddr")
+            if isinstance(tls_addr, str):
+                parsed = urlparse(tls_addr)
+                if parsed.port is not None:
+                    request = (
+                        f"GET / HTTP/1.1\r\n"
+                        f"Host: {host}:{parsed.port}\r\n"
+                        "Connection: close\r\n\r\n"
+                    ).encode("utf-8")
+                    try:
+                        with socket.create_connection(("127.0.0.1", parsed.port), timeout=5) as raw_sock:
+                            raw_sock.settimeout(5)
+                            context = ssl._create_unverified_context()
+                            with context.wrap_socket(raw_sock, server_hostname=host) as tls_sock:
+                                tls_sock.sendall(request)
+                                response = http.client.HTTPResponse(tls_sock)
+                                response.begin()
+                                last_status = response.status
+                                last_body = response.read().decode("utf-8", errors="replace")
+                                if last_status == 200 and last_body == "ok":
+                                    return
+                    except Exception:
+                        pass
+            time.sleep(0.1)
+        raise SmokeFailure(
+            f"{label}: expected TLS route for {host} to return ok"
+            f"\nstatus: {last_status}\nbody: {last_body}"
+        )
+
+    def assert_port_override_persisted(home_dir: Path, project_dir: Path, service: str, port: int, label: str) -> None:
+        ports_toml = home_dir / ".lpm" / "ports.toml"
+        current_key = project_port_override_key(project_dir.resolve())
+        persisted = read_optional_text(ports_toml)
+        require_contains(persisted, f"[{current_key}]", f"{label} persisted project key")
+        require_contains(persisted, f"{service} = {port}", f"{label} persisted assigned port")
+
+    def assert_cert_covers_host(project_dir: Path, env: dict[str, str], host: str, label: str) -> None:
+        status = run_json_envelope(
+            label,
+            project_dir,
+            ["cert", "status", "--json"],
+            env,
+        )
+        hostnames = status.get("project", {}).get("hostnames", [])
+        if not any(
+            isinstance(hostname, str) and host in hostname
+            for hostname in hostnames
+        ):
+            raise SmokeFailure(f"{label}: expected cert hostnames to include {host}")
+
+    def assert_hosts_file_contains_managed_entry(path: Path, host: str, label: str) -> None:
+        content = path.read_text(encoding="utf-8")
+        require_contains(content, "# >>> lpm:project-", f"{label} managed block marker")
+        require_contains(content, f"127.0.0.1 {host}", f"{label} managed host entry")
+
+    def assert_hosts_file_removed_managed_entry(path: Path, host: str, label: str) -> None:
+        content = path.read_text(encoding="utf-8")
+        if "# >>> lpm:project-" in content or host in content:
+            raise SmokeFailure(f"{label}: expected managed hosts entry for {host} to be removed")
+        if content != "127.0.0.1 localhost\n":
+            raise SmokeFailure(f"{label}: expected the hosts file to return to its original content")
+
+    def assert_hosts_file_backup(home_dir: Path, expected_content: str, label: str) -> None:
+        backup_path = home_dir / ".lpm" / "hosts.bak"
+        require_exists(backup_path)
+        if backup_path.read_text(encoding="utf-8") != expected_content:
+            raise SmokeFailure(f"{label}: expected hosts.bak to preserve the original hosts content")
+
+    with tempfile.TemporaryDirectory(prefix="lpmdld-man-", dir="/tmp") as root:
+        root_path = Path(root)
+        project_dir = root_path / "p"
+        home_dir = root_path / "h"
+        env = base_env(home_dir)
+        seed_local_domain_project(project_dir, "web.localhost")
+
+        start_envelope = run_json_envelope(
+            "install/dev local domains proxy start tls json",
+            project_dir,
+            ["--json", "proxy", "start", "--detach", "--tls-port", "0"],
+            env,
+            require_clean_stderr=True,
+        )
+        if not isinstance(start_envelope.get("tlsAddr"), str):
+            raise SmokeFailure(
+                "install/dev local domains proxy start tls json: expected tlsAddr to be present"
+            )
+
+        dev_process = subprocess.Popen(
+            [str(LPM_BIN), "dev", "--no-install", "--no-open", "--yes"],
+            cwd=project_dir,
+            env=merged_env(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            route = wait_for_proxy_route(
+                project_dir,
+                env,
+                "web.localhost",
+                dev_process,
+                "install/dev local domains manual proxy host-only",
+            )
+            upstream_port = route.get("upstreamPort")
+            if not isinstance(upstream_port, int):
+                raise SmokeFailure(
+                    "install/dev local domains manual proxy host-only: expected an auto-assigned upstreamPort"
+                )
+            assert_port_override_persisted(
+                home_dir,
+                project_dir,
+                "web",
+                upstream_port,
+                "install/dev local domains manual proxy host-only",
+            )
+            wait_for_proxy_tls_ok(
+                project_dir,
+                env,
+                "web.localhost",
+                "install/dev local domains manual proxy host-only TLS",
+            )
+
+            dev_stdout, dev_stderr = dev_process.communicate(timeout=15)
+        finally:
+            if dev_process.poll() is None:
+                dev_process.kill()
+                dev_stdout, dev_stderr = dev_process.communicate(timeout=5)
+
+        if dev_process.returncode != 0:
+            raise SmokeFailure(
+                "install/dev local domains manual proxy host-only: lpm dev failed"
+                f"\nstdout: {dev_stdout}\nstderr: {dev_stderr}"
+            )
+        require_contains(
+            dev_stderr,
+            "https://web.localhost -> auto port",
+            "install/dev local domains manual proxy host-only startup banner",
+        )
+        require_contains(
+            dev_stderr,
+            f"web.localhost -> localhost:{upstream_port}",
+            "install/dev local domains manual proxy host-only final route banner",
+        )
+        env_observed = json.loads((project_dir / "env-observed.json").read_text(encoding="utf-8"))
+        if env_observed.get("port") != str(upstream_port):
+            raise SmokeFailure(
+                "install/dev local domains manual proxy host-only: expected env-observed.json to record the assigned port"
+            )
+        for key in ["nodeExtraCaCerts", "sslCertFile", "sslKeyFile"]:
+            if env_observed.get(key) is not None:
+                raise SmokeFailure(
+                    f"install/dev local domains manual proxy host-only: expected {key} to stay unset"
+                )
+        assert_cert_covers_host(
+            project_dir,
+            env,
+            "web.localhost",
+            "install/dev local domains manual proxy host-only cert",
+        )
+        wait_for_proxy_route_absent(
+            project_dir,
+            env,
+            "web.localhost",
+            "install/dev local domains manual proxy host-only cleanup",
+        )
+        stop_detached_proxy(
+            project_dir,
+            env,
+            "install/dev local domains proxy stop tls json",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpmdld-aut-", dir="/tmp") as root:
+        root_path = Path(root)
+        project_dir = root_path / "p"
+        home_dir = root_path / "h"
+        env = base_env(home_dir)
+        seed_local_domain_project(
+            project_dir,
+            "web.localhost",
+            proxy_config={"port": 0, "httpRedirect": False},
+        )
+
+        dev_process = subprocess.Popen(
+            [str(LPM_BIN), "dev", "--no-install", "--no-open", "--yes"],
+            cwd=project_dir,
+            env=merged_env(env),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            route = wait_for_proxy_route(
+                project_dir,
+                env,
+                "web.localhost",
+                dev_process,
+                "install/dev local domains auto-start",
+            )
+            status = poll_proxy_status(project_dir, env)
+            if not isinstance(status.get("tlsAddr"), str):
+                raise SmokeFailure(
+                    "install/dev local domains auto-start: expected the auto-started proxy to expose a TLS listener"
+                )
+            wait_for_proxy_tls_ok(
+                project_dir,
+                env,
+                "web.localhost",
+                "install/dev local domains auto-start TLS",
+            )
+            if not isinstance(route.get("upstreamPort"), int):
+                raise SmokeFailure(
+                    "install/dev local domains auto-start: expected an upstreamPort on the registered route"
+                )
+
+            dev_stdout, dev_stderr = dev_process.communicate(timeout=15)
+        finally:
+            if dev_process.poll() is None:
+                dev_process.kill()
+                dev_stdout, dev_stderr = dev_process.communicate(timeout=5)
+
+        if dev_process.returncode != 0:
+            raise SmokeFailure(
+                "install/dev local domains auto-start: lpm dev failed"
+                f"\nstdout: {dev_stdout}\nstderr: {dev_stderr}"
+            )
+        require_contains(
+            dev_stderr,
+            "local proxy control daemon started in the background",
+            "install/dev local domains auto-start banner",
+        )
+        wait_for_proxy_route_absent(
+            project_dir,
+            env,
+            "web.localhost",
+            "install/dev local domains auto-start cleanup",
+        )
+        stop_detached_proxy(
+            project_dir,
+            env,
+            "install/dev local domains auto-start stop",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpmdld-hos-", dir="/tmp") as root:
+        root_path = Path(root)
+        project_dir = root_path / "p"
+        home_dir = root_path / "h"
+        env = base_env(home_dir)
+        hosts_path = project_dir / "hosts"
+        seed_local_domain_project(project_dir, "web.test")
+        hosts_path.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+
+        run_json_envelope(
+            "install/dev local domains non-localhost proxy start",
+            project_dir,
+            ["--json", "proxy", "start", "--detach", "--tls-port", "0"],
+            env,
+            require_clean_stderr=True,
+        )
+
+        dev_process = subprocess.Popen(
+            [str(LPM_BIN), "dev", "--no-install", "--no-open", "--yes"],
+            cwd=project_dir,
+            env=merged_env({**env, "LPM_HOSTS_FILE": str(hosts_path)}),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            wait_for_proxy_route(
+                project_dir,
+                env,
+                "web.test",
+                dev_process,
+                "install/dev local domains non-localhost hosts",
+            )
+            assert_hosts_file_contains_managed_entry(
+                hosts_path,
+                "web.test",
+                "install/dev local domains non-localhost hosts",
+            )
+            wait_for_proxy_tls_ok(
+                project_dir,
+                env,
+                "web.test",
+                "install/dev local domains non-localhost TLS",
+            )
+
+            dev_stdout, dev_stderr = dev_process.communicate(timeout=15)
+        finally:
+            if dev_process.poll() is None:
+                dev_process.kill()
+                dev_stdout, dev_stderr = dev_process.communicate(timeout=5)
+
+        if dev_process.returncode != 0:
+            raise SmokeFailure(
+                "install/dev local domains non-localhost hosts: lpm dev failed"
+                f"\nstdout: {dev_stdout}\nstderr: {dev_stderr}"
+            )
+        assert_hosts_file_removed_managed_entry(
+            hosts_path,
+            "web.test",
+            "install/dev local domains non-localhost cleanup",
+        )
+        assert_hosts_file_backup(
+            home_dir,
+            "127.0.0.1 localhost\n",
+            "install/dev local domains non-localhost backup",
+        )
+        assert_cert_covers_host(
+            project_dir,
+            env,
+            "web.test",
+            "install/dev local domains non-localhost cert",
+        )
+        wait_for_proxy_route_absent(
+            project_dir,
+            env,
+            "web.test",
+            "install/dev local domains non-localhost route cleanup",
+        )
+        stop_detached_proxy(
+            project_dir,
+            env,
+            "install/dev local domains non-localhost stop",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpmdld-ref-", dir="/tmp") as root:
+        root_path = Path(root)
+        project_dir = root_path / "p"
+        home_dir = root_path / "h"
+        env = base_env(home_dir)
+        hosts_path = project_dir / "hosts"
+        seed_local_domain_project(project_dir, "web.test")
+        hosts_path.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+
+        trust_envelope = run_json_envelope(
+            "install/dev local domains trust test ca json",
+            project_dir,
+            ["cert", "trust", "--json"],
+            env,
+        )
+        if trust_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/dev local domains trust test ca json: expected success=true"
+            )
+
+        run_json_envelope(
+            "install/dev local domains refusal proxy start",
+            project_dir,
+            ["--json", "proxy", "start", "--detach", "--tls-port", "0"],
+            env,
+            require_clean_stderr=True,
+        )
+
+        refusal_args = [str(LPM_BIN), "dev", "--no-install", "--no-open"]
+        log("install/dev local domains hosts consent refusal: " + " ".join(refusal_args))
+        refusal_result = subprocess.run(
+            refusal_args,
+            cwd=project_dir,
+            env=merged_env({**env, "LPM_HOSTS_FILE": str(hosts_path)}),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+        if refusal_result.stdout:
+            sys.stdout.write(refusal_result.stdout)
+        if refusal_result.stderr:
+            sys.stderr.write(refusal_result.stderr)
+        if refusal_result.returncode == 0:
+            raise SmokeFailure(
+                "install/dev local domains hosts consent refusal: expected a non-zero exit without --yes"
+            )
+        require_contains(
+            refusal_result.stderr,
+            "non-interactive shell: pass `--yes` to consent to updating",
+            "install/dev local domains hosts consent refusal guidance",
+        )
+        require_contains(
+            refusal_result.stderr,
+            "the hosts file for local domains (web.test)",
+            "install/dev local domains hosts consent refusal host list",
+        )
+        if hosts_path.read_text(encoding="utf-8") != "127.0.0.1 localhost\n":
+            raise SmokeFailure(
+                "install/dev local domains hosts consent refusal: expected the hosts file to stay unchanged"
+            )
+        routes = poll_proxy_status(project_dir, env).get("routes") or []
+        if routes:
+            raise SmokeFailure(
+                "install/dev local domains hosts consent refusal: expected no proxy routes to be registered"
+            )
+        stop_detached_proxy(
+            project_dir,
+            env,
+            "install/dev local domains refusal stop",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpmdld-dup-", dir="/tmp") as root:
+        root_path = Path(root)
+        project_a = root_path / "a"
+        project_b = root_path / "b"
+        home_dir = root_path / "h"
+        env_shared = base_env(home_dir)
+        hosts_a = project_a / "hosts"
+        hosts_b = project_b / "hosts"
+        seed_local_domain_project(project_a, "shared.test")
+        seed_local_domain_project(project_b, "shared.test")
+        hosts_a.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+        hosts_b.write_text("127.0.0.1 localhost\n", encoding="utf-8")
+
+        run_json_envelope(
+            "install/dev local domains duplicate proxy start",
+            project_a,
+            ["--json", "proxy", "start", "--detach", "--tls-port", "0"],
+            env_shared,
+            require_clean_stderr=True,
+        )
+
+        dev_a = subprocess.Popen(
+            [str(LPM_BIN), "dev", "--no-install", "--no-open", "--yes"],
+            cwd=project_a,
+            env=merged_env({**env_shared, "LPM_HOSTS_FILE": str(hosts_a)}),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        try:
+            wait_for_proxy_route(
+                project_a,
+                env_shared,
+                "shared.test",
+                dev_a,
+                "install/dev local domains duplicate primary route",
+            )
+            assert_hosts_file_contains_managed_entry(
+                hosts_a,
+                "shared.test",
+                "install/dev local domains duplicate primary hosts",
+            )
+            wait_for_proxy_tls_ok(
+                project_a,
+                env_shared,
+                "shared.test",
+                "install/dev local domains duplicate primary TLS",
+            )
+
+            duplicate_result = subprocess.run(
+                [str(LPM_BIN), "dev", "--no-install", "--no-open", "--yes"],
+                cwd=project_b,
+                env=merged_env({**env_shared, "LPM_HOSTS_FILE": str(hosts_b)}),
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+            )
+            if duplicate_result.stdout:
+                sys.stdout.write(duplicate_result.stdout)
+            if duplicate_result.stderr:
+                sys.stderr.write(duplicate_result.stderr)
+            if duplicate_result.returncode == 0:
+                raise SmokeFailure(
+                    "install/dev local domains duplicate host failure: expected the second project to fail"
+                )
+            require_contains(
+                duplicate_result.stderr,
+                "local proxy route registration failed",
+                "install/dev local domains duplicate host failure header",
+            )
+            require_contains(
+                duplicate_result.stderr,
+                "shared.test",
+                "install/dev local domains duplicate host failure host",
+            )
+            require_contains(
+                duplicate_result.stderr,
+                "already registered",
+                "install/dev local domains duplicate host failure duplicate wording",
+            )
+            assert_hosts_file_removed_managed_entry(
+                hosts_b,
+                "shared.test",
+                "install/dev local domains duplicate host cleanup for project b",
+            )
+            routes = poll_proxy_status(project_a, env_shared).get("routes") or []
+            shared_routes = [
+                route
+                for route in routes
+                if isinstance(route, dict) and route.get("host") == "shared.test"
+            ]
+            if len(shared_routes) != 1:
+                raise SmokeFailure(
+                    "install/dev local domains duplicate host failure: expected exactly one shared.test route to remain"
+                )
+
+            dev_a_stdout, dev_a_stderr = dev_a.communicate(timeout=15)
+        finally:
+            if dev_a.poll() is None:
+                dev_a.kill()
+                dev_a_stdout, dev_a_stderr = dev_a.communicate(timeout=5)
+
+        if dev_a.returncode != 0:
+            raise SmokeFailure(
+                "install/dev local domains duplicate host primary project: lpm dev failed"
+                f"\nstdout: {dev_a_stdout}\nstderr: {dev_a_stderr}"
+            )
+        assert_hosts_file_removed_managed_entry(
+            hosts_a,
+            "shared.test",
+            "install/dev local domains duplicate host cleanup for project a",
+        )
+        assert_hosts_file_backup(
+            home_dir,
+            "127.0.0.1 localhost\n",
+            "install/dev local domains duplicate host backup",
+        )
+        wait_for_proxy_route_absent(
+            project_a,
+            env_shared,
+            "shared.test",
+            "install/dev local domains duplicate host route cleanup",
+        )
+        stop_detached_proxy(
+            project_a,
+            env_shared,
+            "install/dev local domains duplicate host stop",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpmdld-nht-", dir="/tmp") as root:
+        root_path = Path(root)
+        project_dir = root_path / "p"
+        home_dir = root_path / "h"
+        env = base_env(home_dir)
+        seed_local_domain_project(project_dir, "web.localhost")
+
+        run_json_envelope(
+            "install/dev local domains http-only proxy start",
+            project_dir,
+            ["--json", "proxy", "start", "--detach", "--http-port", "0"],
+            env,
+            require_clean_stderr=True,
+        )
+
+        no_https_result = run_command_result(
+            "install/dev local domains requires https listener",
+            project_dir,
+            [str(LPM_BIN), "dev", "--no-install", "--no-open", "--yes"],
+            extra_env=env,
+        )
+        if no_https_result.returncode == 0:
+            raise SmokeFailure(
+                "install/dev local domains requires https listener: expected a non-zero exit"
+            )
+        require_contains(
+            no_https_result.stderr,
+            "without an HTTPS listener",
+            "install/dev local domains requires https listener explanation",
+        )
+        require_contains(
+            no_https_result.stderr,
+            "lpm proxy start --tls-port 9443",
+            "install/dev local domains requires https listener restart hint",
+        )
+        routes = poll_proxy_status(project_dir, env).get("routes") or []
+        if routes:
+            raise SmokeFailure(
+                "install/dev local domains requires https listener: expected no proxy routes to be registered"
+            )
+        stop_detached_proxy(
+            project_dir,
+            env,
+            "install/dev local domains http-only proxy stop",
+        )
+
+
 def scenario_install_env_command() -> None:
     fixture = reset_env_fixture().resolve()
 
     with tempfile.TemporaryDirectory(prefix="lpm-smoke-env-") as home_root:
-        scenario_env = {
-            "HOME": home_root,
-            "LPM_HOME": str(Path(home_root) / ".lpm"),
-            "LPM_FORCE_FILE_VAULT": "1",
-            "LPM_TEST_FAST_SCRYPT": "1",
-        }
+        scenario_env = smoke_home_env(
+            home_root,
+            LPM_FORCE_FILE_VAULT="1",
+            LPM_TEST_FAST_SCRYPT="1",
+        )
 
         missing_output = run_command_expect_failure(
             "install/env preview run blocks on missing required secrets",
@@ -10698,16 +11743,1199 @@ def scenario_install_env_command() -> None:
         )
 
 
+def scenario_install_env_pair_command() -> None:
+    browser_public_key = (
+        "BAN3UtJCtRYQ2eiW0lNXa8msDBOJHKsuqad4WnMWkyIWX+r8sLUFBEvBD6eTSc+imZxk1oyURZ9o/FjbDXDopv0="
+    )
+
+    def write_project(project_path: Path, name: str) -> None:
+        project_path.mkdir(parents=True, exist_ok=True)
+        project_path.joinpath("package.json").write_text(
+            json.dumps({"name": name, "version": "1.0.0"}) + "\n",
+            encoding="utf-8",
+        )
+
+    def pairing_env(home_root: str) -> dict[str, str]:
+        return smoke_home_env(
+            home_root,
+            LPM_FORCE_FILE_AUTH="1",
+            LPM_TEST_FAST_SCRYPT="1",
+            LPM_FORCE_FILE_VAULT="1",
+        )
+
+    def configure_pair_routes(
+        registry: MockRegistry,
+        code: str,
+        bearer_token: str,
+        *,
+        device_label: str | None = None,
+        created_at: str | None = None,
+        created_from_ip: str | None = None,
+        status: str = "pending",
+    ) -> None:
+        if registry._server is None:
+            raise SmokeFailure("install/env-pair: mock registry not started")
+
+        body: dict[str, object] = {"status": status, "browserPublicKey": browser_public_key}
+        if device_label is not None:
+            body["deviceLabel"] = device_label
+        if created_at is not None:
+            body["createdAt"] = created_at
+        if created_from_ip is not None:
+            body["createdFromIp"] = created_from_ip
+
+        encoded_body = json.dumps(body, separators=(",", ":")).encode("utf-8")
+        registry._server.method_routes[("GET", f"/api/vault/pair/{code}")] = (
+            200,
+            "application/json",
+            encoded_body,
+        )
+        registry._server.method_routes[("POST", f"/api/vault/pair/{code}")] = (
+            200,
+            "application/json",
+            b'{"success":true}',
+        )
+        registry._server.method_routes[("POST", "/api/vault/pair/revoke-all")] = (
+            200,
+            "application/json",
+            b'{"success":true}',
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-env-pair-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-env-pair-project-"
+    ) as project_root, MockRegistry([]) as registry:
+        registry_base = registry.registry_url.rstrip("/")
+        env = {**pairing_env(home_root), "LPM_REGISTRY_URL": registry_base}
+        project_path = Path(project_root)
+        write_project(project_path, "env-pair-success")
+        configure_pair_routes(registry, "ABC123", "session-access-token")
+        seed_refresh_backed_session(
+            env,
+            registry_base,
+            "session-access-token",
+            "refresh-token",
+            "2030-01-01T00:00:00Z",
+        )
+
+        pair_result = run_command_result(
+            "install/env-pair success",
+            project_path,
+            [
+                str(LPM_BIN),
+                "env",
+                "pair",
+                "abc123",
+                "--yes",
+            ],
+            extra_env=env,
+        )
+        if pair_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/env-pair success failed with exit code {pair_result.returncode}"
+            )
+        pair_output = pair_result.stdout + pair_result.stderr
+        if (
+            "browser paired successfully" not in pair_output
+            and "dashboard can now decrypt your vault secrets" not in pair_output.lower()
+        ):
+            raise SmokeFailure(
+                "install/env-pair success: expected pairing success output"
+            )
+        if not Path(home_root, ".lpm", ".vault-key").exists():
+            raise SmokeFailure(
+                "install/env-pair success: expected a file-backed wrapping key in isolated HOME"
+            )
+
+        get_requests = registry.request_details(method="GET", path="/api/vault/pair/ABC123")
+        if len(get_requests) != 1:
+            raise SmokeFailure(
+                "install/env-pair success: expected exactly one GET pairing request against the uppercased code"
+            )
+        if get_requests[0].get("headers", {}).get("authorization") != "Bearer session-access-token":
+            raise SmokeFailure(
+                "install/env-pair success: expected the pairing GET to use the seeded bearer token"
+            )
+        post_requests = registry.request_details(method="POST", path="/api/vault/pair/ABC123")
+        if len(post_requests) != 1:
+            raise SmokeFailure(
+                "install/env-pair success: expected exactly one POST pairing approval request against the uppercased code"
+            )
+        approval_payload = json.loads(post_requests[0]["body"])
+        if not isinstance(approval_payload.get("encryptedWrappingKey"), str) or not approval_payload.get(
+            "encryptedWrappingKey"
+        ):
+            raise SmokeFailure(
+                "install/env-pair success: expected encryptedWrappingKey in the approval payload"
+            )
+        if not isinstance(approval_payload.get("ephemeralPublicKey"), str) or not approval_payload.get(
+            "ephemeralPublicKey"
+        ):
+            raise SmokeFailure(
+                "install/env-pair success: expected ephemeralPublicKey in the approval payload"
+            )
+
+        unpair_result = run_command_result(
+            "install/env-pair unpair success",
+            project_path,
+            [
+                str(LPM_BIN),
+                "env",
+                "unpair",
+            ],
+            extra_env=env,
+        )
+        if unpair_result.returncode != 0:
+            raise SmokeFailure(
+                "install/env-pair unpair success failed with exit code "
+                f"{unpair_result.returncode}"
+            )
+        unpair_output = unpair_result.stdout + unpair_result.stderr
+        require_contains(
+            unpair_output,
+            "all browser pairings revoked",
+            "install/env-pair unpair success output",
+        )
+        revoke_requests = registry.request_details(
+            method="POST", path="/api/vault/pair/revoke-all"
+        )
+        if len(revoke_requests) != 1:
+            raise SmokeFailure(
+                "install/env-pair unpair success: expected one revoke-all request"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-env-pair-notty-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-env-pair-notty-project-"
+    ) as project_root, MockRegistry([]) as registry:
+        registry_base = registry.registry_url.rstrip("/")
+        env = {**pairing_env(home_root), "LPM_REGISTRY_URL": registry_base}
+        project_path = Path(project_root)
+        write_project(project_path, "env-pair-notty")
+        configure_pair_routes(registry, "NOTTY1", "session-access-token")
+        seed_refresh_backed_session(
+            env,
+            registry_base,
+            "session-access-token",
+            "refresh-token",
+            "2030-01-01T00:00:00Z",
+        )
+
+        notty_args = [
+            str(LPM_BIN),
+            "env",
+            "pair",
+            "notty1",
+        ]
+        log(f"install/env-pair non-tty refusal: {' '.join(notty_args)}")
+        notty_result = subprocess.run(
+            notty_args,
+            cwd=project_path,
+            env=merged_env(env),
+            capture_output=True,
+            text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        if notty_result.stdout:
+            sys.stdout.write(notty_result.stdout)
+        if notty_result.stderr:
+            sys.stderr.write(notty_result.stderr)
+        if notty_result.returncode == 0:
+            raise SmokeFailure(
+                "install/env-pair non-tty refusal: expected a non-zero exit"
+            )
+        notty_output = notty_result.stdout + notty_result.stderr
+        if "interactive terminal" not in notty_output and "--yes" not in notty_output:
+            raise SmokeFailure(
+                "install/env-pair non-tty refusal: expected guidance about interactive terminals or --yes"
+            )
+        if registry.request_details(path="/api/vault/pair/NOTTY1"):
+            raise SmokeFailure(
+                "install/env-pair non-tty refusal: expected the CLI to refuse before touching the registry"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-env-pair-meta-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-env-pair-meta-project-"
+    ) as project_root, MockRegistry([]) as registry:
+        registry_base = registry.registry_url.rstrip("/")
+        env = {**pairing_env(home_root), "LPM_REGISTRY_URL": registry_base}
+        project_path = Path(project_root)
+        write_project(project_path, "env-pair-meta")
+        configure_pair_routes(
+            registry,
+            "META01",
+            "session-access-token",
+            device_label="Safari on iOS",
+            created_at="2026-05-20T12:34:56Z",
+            created_from_ip="203.0.113.0/24",
+        )
+        seed_refresh_backed_session(
+            env,
+            registry_base,
+            "session-access-token",
+            "refresh-token",
+            "2030-01-01T00:00:00Z",
+        )
+
+        metadata_result = run_command_result(
+            "install/env-pair metadata audit",
+            project_path,
+            [
+                str(LPM_BIN),
+                "env",
+                "pair",
+                "meta01",
+                "--yes",
+            ],
+            extra_env=env,
+        )
+        if metadata_result.returncode != 0:
+            raise SmokeFailure(
+                "install/env-pair metadata audit failed with exit code "
+                f"{metadata_result.returncode}"
+            )
+        metadata_output = metadata_result.stdout + metadata_result.stderr
+        require_contains(
+            metadata_output,
+            "Browser key fingerprint",
+            "install/env-pair metadata audit output",
+        )
+        require_contains(
+            metadata_output,
+            "Safari on iOS",
+            "install/env-pair metadata audit output",
+        )
+        require_contains(
+            metadata_output,
+            "203.0.113.0/24",
+            "install/env-pair metadata audit output",
+        )
+        require_contains(
+            metadata_output,
+            "Verify the dashboard shows the same number",
+            "install/env-pair metadata audit output",
+        )
+        require_contains(
+            metadata_output,
+            "skipped browser-identity verification",
+            "install/env-pair metadata audit output",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-env-pair-legacy-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-env-pair-legacy-project-"
+    ) as project_root, MockRegistry([]) as registry:
+        registry_base = registry.registry_url.rstrip("/")
+        env = {**pairing_env(home_root), "LPM_REGISTRY_URL": registry_base}
+        env["LPM_TOKEN"] = "legacy-token"
+        project_path = Path(project_root)
+        write_project(project_path, "env-unpair-legacy")
+        configure_pair_routes(registry, "LEGACY", "legacy-token")
+
+        legacy_result = run_command_result(
+            "install/env-pair legacy unpair refusal",
+            project_path,
+            [
+                str(LPM_BIN),
+                "env",
+                "unpair",
+            ],
+            extra_env=env,
+        )
+        if legacy_result.returncode == 0:
+            raise SmokeFailure(
+                "install/env-pair legacy unpair refusal: expected a non-zero exit"
+            )
+        legacy_output = legacy_result.stdout + legacy_result.stderr
+        if (
+            "legacy token" not in legacy_output
+            and "doesn't support vault" not in legacy_output
+        ):
+            raise SmokeFailure(
+                "install/env-pair legacy unpair refusal: expected the legacy-token session requirement error"
+            )
+        if registry.request_details(path="/api/vault/pair/revoke-all"):
+            raise SmokeFailure(
+                "install/env-pair legacy unpair refusal: expected no revoke-all request"
+            )
+
+
+def scenario_install_skills_command() -> None:
+    def write_project(project_path: Path, name: str) -> None:
+        project_path.mkdir(parents=True, exist_ok=True)
+        project_path.joinpath("package.json").write_text(
+            json.dumps({"name": name, "version": "1.0.0"}) + "\n",
+            encoding="utf-8",
+        )
+
+    def seed_skill(project_path: Path, package_name: str, skill_name: str, body: str) -> None:
+        skill_path = project_path / ".lpm" / "skills" / package_name / f"{skill_name}.md"
+        skill_path.parent.mkdir(parents=True, exist_ok=True)
+        skill_path.write_text(body, encoding="utf-8")
+
+    with tempfile.TemporaryDirectory(prefix="lpm-skills-list-empty-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "skills-list-empty")
+
+        empty_list_result = run_command_result(
+            "install/skills list empty",
+            project_path,
+            [str(LPM_BIN), "skills", "list"],
+        )
+        if empty_list_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/skills list empty failed with exit code {empty_list_result.returncode}"
+            )
+        empty_combined = empty_list_result.stdout + empty_list_result.stderr
+        require_contains(
+            empty_combined,
+            "No skills installed",
+            "install/skills list empty output",
+        )
+        if any(gutter in empty_combined for gutter in ("●", "│", "◇")):
+            raise SmokeFailure(
+                "install/skills list empty: expected slim output without cliclack gutter characters"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-skills-list-seeded-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "skills-list-seeded")
+        seed_skill(project_path, "alice.tools", "format-code", "# format-code\n")
+        seed_skill(project_path, "alice.tools", "lint-rules", "# lint-rules\n")
+        seed_skill(project_path, "bob.helpers", "deploy", "# deploy\n")
+
+        list_result = run_command_result(
+            "install/skills list seeded",
+            project_path,
+            [str(LPM_BIN), "skills", "list"],
+        )
+        if list_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/skills list seeded failed with exit code {list_result.returncode}"
+            )
+        require_contains(
+            list_result.stdout,
+            "@lpm.dev/alice.tools",
+            "install/skills list seeded stdout",
+        )
+        require_contains(
+            list_result.stdout,
+            "@lpm.dev/bob.helpers",
+            "install/skills list seeded stdout",
+        )
+        for skill_name in ("format-code.md", "lint-rules.md", "deploy.md"):
+            require_contains(
+                list_result.stdout,
+                skill_name,
+                "install/skills list seeded stdout",
+            )
+        require_not_contains(
+            list_result.stdout,
+            "3 skills installed",
+            "install/skills list seeded stdout summary placement",
+        )
+        if "\x1b" in list_result.stdout:
+            raise SmokeFailure(
+                "install/skills list seeded: expected stdout to stay uncolored under NO_COLOR=1"
+            )
+        require_contains(
+            list_result.stderr,
+            "✓ 3 skills installed across 2 packages",
+            "install/skills list seeded stderr",
+        )
+        if any(gutter in list_result.stderr for gutter in ("●", "│", "◇")):
+            raise SmokeFailure(
+                "install/skills list seeded: expected slim stderr without cliclack gutter characters"
+            )
+
+        list_json_result = run_command_result(
+            "install/skills list json",
+            project_path,
+            [str(LPM_BIN), "--json", "skills", "list"],
+        )
+        if list_json_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/skills list json failed with exit code {list_json_result.returncode}"
+            )
+        list_envelope = json.loads(list_json_result.stdout)
+        if list_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/skills list json: expected success=true"
+            )
+        alice_skills = list_envelope.get("alice.tools")
+        if not isinstance(alice_skills, list) or len(alice_skills) != 2:
+            raise SmokeFailure(
+                "install/skills list json: expected alice.tools to contain two skills"
+            )
+        alice_names = {entry.get("name") for entry in alice_skills if isinstance(entry, dict)}
+        if alice_names != {"format-code", "lint-rules"}:
+            raise SmokeFailure(
+                "install/skills list json: expected the seeded alice.tools skill names"
+            )
+        if not all(isinstance(entry.get("size"), int) for entry in alice_skills if isinstance(entry, dict)):
+            raise SmokeFailure(
+                "install/skills list json: expected every skill entry to carry a numeric size"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-skills-validate-ok-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "skills-validate-ok")
+        seed_skill(
+            project_path,
+            "alice.tools",
+            "ok",
+            "---\nname: ok\ndescription: A small but well-formed skill for the validate-happy-path smoke\n---\n\n"
+            + "well-formed body content. " * 8,
+        )
+
+        validate_ok_result = run_command_result(
+            "install/skills validate ok",
+            project_path,
+            [str(LPM_BIN), "skills", "validate"],
+        )
+        if validate_ok_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/skills validate ok failed with exit code {validate_ok_result.returncode}"
+            )
+        require_contains(
+            validate_ok_result.stderr,
+            "✓ 1 skill valid",
+            "install/skills validate ok stderr",
+        )
+        if any(gutter in validate_ok_result.stderr for gutter in ("●", "│", "◇")):
+            raise SmokeFailure(
+                "install/skills validate ok: expected slim stderr without cliclack gutter characters"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-skills-validate-fail-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "skills-validate-fail")
+        seed_skill(project_path, "alice.tools", "too-big", "x" * (20 * 1024))
+
+        validate_fail_result = run_command_result(
+            "install/skills validate fail json",
+            project_path,
+            [str(LPM_BIN), "--json", "skills", "validate"],
+        )
+        if validate_fail_result.returncode != 1:
+            raise SmokeFailure(
+                "install/skills validate fail json: expected exit code 1 when errors are present"
+            )
+        validate_fail_envelope = json.loads(validate_fail_result.stdout)
+        if validate_fail_envelope.get("success") is not False:
+            raise SmokeFailure(
+                "install/skills validate fail json: expected success=false"
+            )
+        errors = validate_fail_envelope.get("errors")
+        if not isinstance(errors, list) or len(errors) != 1:
+            raise SmokeFailure(
+                "install/skills validate fail json: expected exactly one error entry"
+            )
+        error_text = errors[0]
+        if not isinstance(error_text, str) or (
+            "15KB" not in error_text and "limit" not in error_text and "exceed" not in error_text
+        ):
+            raise SmokeFailure(
+                "install/skills validate fail json: expected the size-limit error to be surfaced"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-skills-validate-empty-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "skills-validate-empty")
+
+        validate_empty_result = run_command_result(
+            "install/skills validate empty",
+            project_path,
+            [str(LPM_BIN), "skills", "validate"],
+        )
+        if validate_empty_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/skills validate empty failed with exit code {validate_empty_result.returncode}"
+            )
+        require_contains(
+            validate_empty_result.stderr,
+            "No .lpm/skills/ directory found",
+            "install/skills validate empty stderr",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-skills-clean-json-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "skills-clean-json")
+        seed_skill(project_path, "alice.tools", "a", "# a\n")
+        seed_skill(project_path, "alice.tools", "b", "# b\n")
+        seed_skill(project_path, "bob.helpers", "c", "# c\n")
+
+        clean_json_result = run_command_result(
+            "install/skills clean json",
+            project_path,
+            [str(LPM_BIN), "--json", "skills", "clean"],
+        )
+        if clean_json_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/skills clean json failed with exit code {clean_json_result.returncode}"
+            )
+        if (project_path / ".lpm" / "skills").exists():
+            raise SmokeFailure(
+                "install/skills clean json: expected .lpm/skills to be removed"
+            )
+        clean_json_envelope = json.loads(clean_json_result.stdout)
+        if clean_json_envelope.get("success") is not True or clean_json_envelope.get("cleaned") is not True:
+            raise SmokeFailure(
+                "install/skills clean json: expected success=true and cleaned=true"
+            )
+        if clean_json_envelope.get("files_removed") != 3:
+            raise SmokeFailure(
+                "install/skills clean json: expected files_removed=3"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-skills-clean-empty-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "skills-clean-empty")
+
+        clean_empty_result = run_command_result(
+            "install/skills clean empty",
+            project_path,
+            [str(LPM_BIN), "skills", "clean"],
+        )
+        if clean_empty_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/skills clean empty failed with exit code {clean_empty_result.returncode}"
+            )
+        require_contains(
+            clean_empty_result.stderr,
+            "No skills to clean",
+            "install/skills clean empty stderr",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-skills-clean-human-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "skills-clean-human")
+        seed_skill(project_path, "alice.tools", "a", "# a\n")
+        seed_skill(project_path, "alice.tools", "b", "# b\n")
+
+        clean_human_result = run_command_result(
+            "install/skills clean human",
+            project_path,
+            [str(LPM_BIN), "skills", "clean"],
+        )
+        if clean_human_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/skills clean human failed with exit code {clean_human_result.returncode}"
+            )
+        if (project_path / ".lpm" / "skills").exists():
+            raise SmokeFailure(
+                "install/skills clean human: expected .lpm/skills to be removed"
+            )
+        require_contains(
+            clean_human_result.stderr,
+            "✓ Skills cleaned · removed 2 files",
+            "install/skills clean human stderr",
+        )
+        if any(gutter in clean_human_result.stderr for gutter in ("●", "│", "◇")):
+            raise SmokeFailure(
+                "install/skills clean human: expected slim stderr without cliclack gutter characters"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-skills-unknown-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "skills-unknown")
+
+        unknown_result = run_command_result(
+            "install/skills unknown action",
+            project_path,
+            [str(LPM_BIN), "skills", "not-a-real-action"],
+        )
+        if unknown_result.returncode == 0:
+            raise SmokeFailure(
+                "install/skills unknown action: expected a non-zero exit"
+            )
+        unknown_output = unknown_result.stdout + unknown_result.stderr
+        for action in ("list", "install", "validate", "clean"):
+            require_contains(
+                unknown_output,
+                action,
+                "install/skills unknown action output",
+            )
+
+
+def scenario_install_exec_command() -> None:
+    def write_project(project_path: Path, name: str) -> None:
+        project_path.mkdir(parents=True, exist_ok=True)
+        project_path.joinpath("package.json").write_text(
+            json.dumps({"name": name, "version": "1.0.0"}) + "\n",
+            encoding="utf-8",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-exec-ok-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "exec-test")
+        project_path.joinpath(".env").write_text(
+            "EXEC_MESSAGE=hello-from-dotenv\n",
+            encoding="utf-8",
+        )
+        scripts_dir = project_path / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        scripts_dir.joinpath("echo.js").write_text(
+            "const payload = {\n"
+            "  env: process.env.EXEC_MESSAGE,\n"
+            "  args: process.argv.slice(2),\n"
+            "}\n"
+            "console.log(JSON.stringify(payload))\n",
+            encoding="utf-8",
+        )
+
+        exec_result = run_command_result(
+            "install/exec js dotenv args",
+            project_path,
+            [str(LPM_BIN), "exec", "scripts/echo.js", "--", "--flag", "value"],
+        )
+        if exec_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/exec js dotenv args failed with exit code {exec_result.returncode}"
+            )
+        require_contains(
+            exec_result.stdout,
+            '{"env":"hello-from-dotenv","args":["--flag","value"]}',
+            "install/exec js dotenv args stdout",
+        )
+        require_contains(
+            exec_result.stderr,
+            "› Executing scripts/echo.js with Node.js",
+            "install/exec js dotenv args stderr",
+        )
+        require_contains(
+            exec_result.stderr,
+            "✓ Done · exited 0 in",
+            "install/exec js dotenv args stderr",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-exec-missing-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "exec-missing")
+
+        missing_result = run_command_result(
+            "install/exec missing file",
+            project_path,
+            [str(LPM_BIN), "exec", "scripts/missing.js"],
+        )
+        if missing_result.returncode == 0:
+            raise SmokeFailure(
+                "install/exec missing file: expected a non-zero exit"
+            )
+        require_contains(
+            missing_result.stderr,
+            "file not found",
+            "install/exec missing file stderr",
+        )
+
+        missing_json_result = run_command_result(
+            "install/exec missing file json",
+            project_path,
+            [str(LPM_BIN), "--json", "exec", "scripts/missing.js"],
+        )
+        if missing_json_result.returncode == 0:
+            raise SmokeFailure(
+                "install/exec missing file json: expected a non-zero exit"
+            )
+        missing_json_envelope = json.loads(missing_json_result.stdout)
+        if missing_json_envelope.get("success") is not False:
+            raise SmokeFailure(
+                "install/exec missing file json: expected success=false"
+            )
+        error_message = missing_json_envelope.get("error")
+        if not isinstance(error_message, str) or (
+            "file not found" not in error_message and "missing.js" not in error_message
+        ):
+            raise SmokeFailure(
+                "install/exec missing file json: expected the missing-file error in the JSON envelope"
+            )
+
+
+def scenario_install_dlx_command() -> None:
+    def write_project(project_path: Path, name: str) -> None:
+        project_path.mkdir(parents=True, exist_ok=True)
+        project_path.joinpath("package.json").write_text(
+            json.dumps({"name": name, "version": "1.0.0"}) + "\n",
+            encoding="utf-8",
+        )
+
+    def deterministic_hash(value: str) -> str:
+        fnv_offset = 0xCBF29CE484222325
+        fnv_prime = 0x00000100000001B3
+        hash_value = fnv_offset
+        for byte in value.encode("utf-8"):
+            hash_value ^= byte
+            hash_value = (hash_value * fnv_prime) & 0xFFFFFFFFFFFFFFFF
+        return f"{hash_value:016x}"
+
+    def seed_dlx_cache(
+        lpm_home: Path,
+        spec: str,
+        package_name: str,
+        installed_package_json: str,
+    ) -> Path:
+        cache_dir = lpm_home / "cache" / "dlx" / deterministic_hash(spec)
+        bin_dir = cache_dir / "node_modules" / ".bin"
+        package_dir = cache_dir / "node_modules" / package_name
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        package_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir.joinpath("package.json").write_text(
+            '{"private":true}',
+            encoding="utf-8",
+        )
+        package_dir.joinpath("package.json").write_text(
+            installed_package_json,
+            encoding="utf-8",
+        )
+        return cache_dir
+
+    def parse_prefixed_json(label: str, stdout: str) -> dict[str, object]:
+        start = stdout.find("{")
+        if start == -1:
+            raise SmokeFailure(f"{label}: expected a JSON object in stdout")
+        try:
+            payload = json.loads(stdout[start:])
+        except json.JSONDecodeError as error:
+            raise SmokeFailure(
+                f"{label}: expected valid JSON after any human prelude, got {stdout!r}"
+            ) from error
+        if not isinstance(payload, dict):
+            raise SmokeFailure(f"{label}: expected top-level JSON object")
+        return payload
+
+    with tempfile.TemporaryDirectory(prefix="lpm-dlx-cache-hit-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-dlx-cache-hit-project-"
+    ) as project_root:
+        lpm_home = Path(home_root) / ".lpm"
+        env = smoke_home_env(home_root)
+        project_path = Path(project_root)
+        write_project(project_path, "dlx-test")
+
+        spec = "npm-check-updates@1.0.0"
+        cache_dir = seed_dlx_cache(
+            lpm_home,
+            spec,
+            "npm-check-updates",
+            '{"name":"npm-check-updates","bin":{"ncu":"./build/cli.js"}}',
+        )
+        bin_path = cache_dir / "node_modules" / ".bin" / "ncu"
+        write_executable(
+            bin_path,
+            '#!/bin/sh\nprintf "cwd:%s\\nargs:%s\\n" "$PWD" "$*"\n',
+        )
+
+        package_json_path = cache_dir / "package.json"
+        before = time.time() - 60
+        os.utime(package_json_path, (before, before))
+
+        cache_hit_result = run_command_result(
+            "install/dlx cache hit",
+            project_path,
+            [str(LPM_BIN), "dlx", spec, "--", "--loud", "hello"],
+            extra_env=env,
+        )
+        if cache_hit_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/dlx cache hit failed with exit code {cache_hit_result.returncode}"
+            )
+        require_contains(
+            cache_hit_result.stdout,
+            f"cwd:{project_path.resolve()}",
+            "install/dlx cache hit stdout",
+        )
+        require_contains(
+            cache_hit_result.stdout,
+            "args:--loud hello",
+            "install/dlx cache hit stdout",
+        )
+        require_contains(
+            cache_hit_result.stderr,
+            "› Resolving npm-check-updates@1.0.0",
+            "install/dlx cache hit stderr",
+        )
+        require_contains(
+            cache_hit_result.stderr,
+            "› Reusing dlx cache entry (fresh)",
+            "install/dlx cache hit stderr",
+        )
+        after = package_json_path.stat().st_mtime
+        if after <= before:
+            raise SmokeFailure(
+                "install/dlx cache hit: expected the cache entry mtime to be refreshed after successful execution"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-dlx-malformed-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-dlx-malformed-project-"
+    ) as project_root:
+        env = smoke_home_env(home_root)
+        project_path = Path(project_root)
+        write_project(project_path, "dlx-malformed")
+
+        malformed_result = run_command_result(
+            "install/dlx malformed spec json",
+            project_path,
+            [str(LPM_BIN), "--json", "dlx", "@@@"],
+            extra_env=env,
+        )
+        if malformed_result.returncode == 0:
+            raise SmokeFailure(
+                "install/dlx malformed spec json: expected a non-zero exit"
+            )
+        malformed_envelope = parse_prefixed_json(
+            "install/dlx malformed spec json",
+            malformed_result.stdout,
+        )
+        if malformed_envelope.get("success") is not False:
+            raise SmokeFailure(
+                "install/dlx malformed spec json: expected success=false"
+            )
+        error_message = malformed_envelope.get("error")
+        if not isinstance(error_message, str) or (
+            "range" not in error_message and "invalid" not in error_message
+        ):
+            raise SmokeFailure(
+                "install/dlx malformed spec json: expected the resolver parse error in the JSON envelope"
+            )
+
+
+def scenario_install_swift_registry_command() -> None:
+    def write_project(project_path: Path, name: str) -> None:
+        project_path.mkdir(parents=True, exist_ok=True)
+        project_path.joinpath("package.json").write_text(
+            json.dumps({"name": name, "version": "1.0.0"}) + "\n",
+            encoding="utf-8",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-swift-help-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "swift-help")
+
+        help_result = run_command_result(
+            "install/swift-registry help",
+            project_path,
+            [str(LPM_BIN), "swift-registry", "--help"],
+        )
+        if help_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/swift-registry help failed with exit code {help_result.returncode}"
+            )
+        help_output = help_result.stdout + help_result.stderr
+        if not any(
+            token in help_output for token in ["swift", "Swift", "registry"]
+        ):
+            raise SmokeFailure(
+                "install/swift-registry help: expected help text to mention swift or registry"
+            )
+
+        force_help_result = run_command_result(
+            "install/swift-registry force help",
+            project_path,
+            [str(LPM_BIN), "swift-registry", "--force", "--help"],
+        )
+        if "unexpected argument" in force_help_result.stderr:
+            raise SmokeFailure(
+                "install/swift-registry force help: expected --force to be accepted by the parser"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-swift-http-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-swift-http-project-"
+    ) as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "swift-http")
+        env = smoke_home_env(
+            home_root,
+            LPM_REGISTRY_URL="http://example.com",
+        )
+        cert_path = Path(home_root) / ".swiftpm" / "security" / "trusted-root-certs" / "lpm.der"
+        registries_path = Path(home_root) / ".swiftpm" / "configuration" / "registries.json"
+
+        insecure_result = run_command_result(
+            "install/swift-registry insecure http",
+            project_path,
+            [str(LPM_BIN), "swift-registry"],
+            extra_env=env,
+        )
+        if insecure_result.returncode == 0:
+            raise SmokeFailure(
+                "install/swift-registry insecure http: expected a non-zero exit"
+            )
+        insecure_output = insecure_result.stdout + insecure_result.stderr
+        require_contains(
+            insecure_output,
+            "swift-registry setup refuses to install global SwiftPM",
+            "install/swift-registry insecure http output",
+        )
+        require_contains(
+            insecure_output,
+            "against http://example.com",
+            "install/swift-registry insecure http output",
+        )
+        require_contains(
+            insecure_output,
+            "only https:// (any host)",
+            "install/swift-registry insecure http output",
+        )
+        require_contains(
+            insecure_output,
+            "http:// loopback URLs are accepted (H20)",
+            "install/swift-registry insecure http output",
+        )
+        if cert_path.exists():
+            raise SmokeFailure(
+                "install/swift-registry insecure http: expected the signing certificate trust store to remain untouched on early refusal"
+            )
+        if registries_path.exists():
+            raise SmokeFailure(
+                "install/swift-registry insecure http: expected registries.json to remain untouched on early refusal"
+            )
+
+        insecure_json_result = run_command_result(
+            "install/swift-registry insecure http json",
+            project_path,
+            [str(LPM_BIN), "--json", "swift-registry"],
+            extra_env=env,
+        )
+        if insecure_json_result.returncode == 0:
+            raise SmokeFailure(
+                "install/swift-registry insecure http json: expected a non-zero exit"
+            )
+        insecure_json_envelope = parse_json_stdout(
+            "install/swift-registry insecure http json",
+            insecure_json_result,
+        )
+        if insecure_json_envelope.get("success") is not False:
+            raise SmokeFailure(
+                "install/swift-registry insecure http json: expected success=false"
+            )
+        error_message = insecure_json_envelope.get("error")
+        if not isinstance(error_message, str) or (
+            "only https:// (any host)" not in error_message
+            or "http:// loopback URLs are accepted (H20)" not in error_message
+        ):
+            raise SmokeFailure(
+                "install/swift-registry insecure http json: expected the H20 refusal message in the JSON envelope"
+            )
+
+
+def scenario_install_mcp_command() -> None:
+    def write_project(project_path: Path, name: str) -> None:
+        project_path.mkdir(parents=True, exist_ok=True)
+        project_path.joinpath("package.json").write_text(
+            json.dumps({"name": name, "version": "1.0.0"}) + "\n",
+            encoding="utf-8",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-mcp-fresh-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-mcp-fresh-project-"
+    ) as project_root:
+        env = smoke_home_env(home_root)
+        project_path = Path(project_root)
+        write_project(project_path, "mcp")
+
+        status_result = run_command_result(
+            "install/mcp status fresh home",
+            project_path,
+            [str(LPM_BIN), "mcp", "status"],
+            extra_env=env,
+        )
+        if status_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/mcp status fresh home failed with exit code {status_result.returncode}"
+            )
+        require_contains(
+            status_result.stderr,
+            "✓ MCP status loaded",
+            "install/mcp status fresh home stderr",
+        )
+        for gutter in ("●", "│", "◇"):
+            if gutter in status_result.stderr:
+                raise SmokeFailure(
+                    "install/mcp status fresh home: expected slim human status output without cliclack gutter characters"
+                )
+
+        status_json_result = run_command_result(
+            "install/mcp status json",
+            project_path,
+            [str(LPM_BIN), "--json", "mcp", "status"],
+            extra_env=env,
+        )
+        if status_json_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/mcp status json failed with exit code {status_json_result.returncode}"
+            )
+        status_envelope = parse_json_stdout(
+            "install/mcp status json",
+            status_json_result,
+        )
+        if status_envelope.get("success") is not True:
+            raise SmokeFailure("install/mcp status json: expected success=true")
+        editors = status_envelope.get("editors")
+        if not isinstance(editors, list) or not editors:
+            raise SmokeFailure(
+                "install/mcp status json: expected a non-empty editors list"
+            )
+        claude_entry = next(
+            (
+                entry
+                for entry in editors
+                if isinstance(entry, dict) and entry.get("editor") == "Claude Code"
+            ),
+            None,
+        )
+        if not isinstance(claude_entry, dict):
+            raise SmokeFailure(
+                "install/mcp status json: expected a Claude Code editor entry"
+            )
+        if claude_entry.get("config_exists") is not False:
+            raise SmokeFailure(
+                "install/mcp status json: expected Claude Code config_exists=false on a fresh HOME"
+            )
+        if claude_entry.get("servers") != []:
+            raise SmokeFailure(
+                "install/mcp status json: expected Claude Code to report no configured servers on a fresh HOME"
+            )
+
+        remove_no_name_result = run_command_result(
+            "install/mcp remove without name",
+            project_path,
+            [str(LPM_BIN), "mcp", "remove"],
+            extra_env=env,
+        )
+        if remove_no_name_result.returncode == 0:
+            raise SmokeFailure(
+                "install/mcp remove without name: expected a non-zero exit"
+            )
+        if (
+            "specify server name" not in remove_no_name_result.stderr
+            and "name" not in remove_no_name_result.stderr
+        ):
+            raise SmokeFailure(
+                "install/mcp remove without name: expected a helpful server-name hint in stderr"
+            )
+
+        unknown_action_result = run_command_result(
+            "install/mcp unknown action",
+            project_path,
+            [str(LPM_BIN), "mcp", "not-a-real-action"],
+            extra_env=env,
+        )
+        if unknown_action_result.returncode == 0:
+            raise SmokeFailure(
+                "install/mcp unknown action: expected a non-zero exit"
+            )
+        for action in ("setup", "remove", "status"):
+            require_contains(
+                unknown_action_result.stderr,
+                action,
+                "install/mcp unknown action stderr",
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-mcp-setup-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-mcp-setup-project-"
+    ) as project_root:
+        env = smoke_home_env(home_root)
+        project_path = Path(project_root)
+        write_project(project_path, "mcp-setup")
+        claude_config_path = Path(home_root) / ".claude.json"
+        claude_config_path.write_text("{}", encoding="utf-8")
+
+        setup_result = run_command_result(
+            "install/mcp setup",
+            project_path,
+            [str(LPM_BIN), "mcp", "setup", "test-server"],
+            extra_env=env,
+        )
+        if setup_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/mcp setup failed with exit code {setup_result.returncode}"
+            )
+        require_contains(
+            setup_result.stderr,
+            "› Configuring MCP servers for supported editors",
+            "install/mcp setup stderr",
+        )
+        require_contains(
+            setup_result.stderr,
+            "✓ Claude Code",
+            "install/mcp setup stderr",
+        )
+        require_contains(
+            setup_result.stderr,
+            "configured",
+            "install/mcp setup stderr",
+        )
+        require_contains(
+            setup_result.stderr,
+            "○",
+            "install/mcp setup stderr",
+        )
+        require_contains(
+            setup_result.stderr,
+            "skipped (config not found)",
+            "install/mcp setup stderr",
+        )
+        require_contains(
+            setup_result.stderr,
+            "✓ Server name: test-server",
+            "install/mcp setup stderr",
+        )
+        require_contains(
+            setup_result.stderr,
+            "✓ Done · restart your editor to pick up the new MCP server",
+            "install/mcp setup stderr",
+        )
+        for gutter in ("●", "│", "◇"):
+            if gutter in setup_result.stderr:
+                raise SmokeFailure(
+                    "install/mcp setup: expected slim human status output without cliclack gutter characters"
+                )
+
+        claude_config = json.loads(claude_config_path.read_text(encoding="utf-8"))
+        server_config = claude_config.get("mcpServers", {}).get("test-server")
+        if not isinstance(server_config, dict):
+            raise SmokeFailure(
+                "install/mcp setup: expected Claude Code config to contain the seeded MCP server entry"
+            )
+        if server_config.get("command") != "npx":
+            raise SmokeFailure(
+                "install/mcp setup: expected the MCP server command to be npx"
+            )
+        if server_config.get("args") != ["-y", "@lpm.dev/lpm-mcp-server"]:
+            raise SmokeFailure(
+                "install/mcp setup: expected the MCP server args to match the documented unpinned npx autostart"
+            )
+
+        remove_result = run_command_result(
+            "install/mcp remove",
+            project_path,
+            [str(LPM_BIN), "mcp", "remove", "test-server"],
+            extra_env=env,
+        )
+        if remove_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/mcp remove failed with exit code {remove_result.returncode}"
+            )
+        require_contains(
+            remove_result.stderr,
+            '✓ Removed "test-server" from',
+            "install/mcp remove stderr",
+        )
+        for gutter in ("●", "│", "◇"):
+            if gutter in remove_result.stderr:
+                raise SmokeFailure(
+                    "install/mcp remove: expected slim human status output without cliclack gutter characters"
+                )
+
+        claude_config_after = json.loads(claude_config_path.read_text(encoding="utf-8"))
+        if "test-server" in claude_config_after.get("mcpServers", {}):
+            raise SmokeFailure(
+                "install/mcp remove: expected the server entry to be removed from the Claude Code config"
+            )
+
+
 def scenario_install_tunnel_command() -> None:
     fixture = reset_tunnel_fixture().resolve()
 
     with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         lpm_home = Path(home_root) / ".lpm"
-        scenario_env = {
-            "HOME": home_root,
-            "LPM_HOME": str(lpm_home),
-            "LPM_FORCE_FILE_AUTH": "1",
-        }
+        scenario_env = smoke_home_env(home_root, LPM_FORCE_FILE_AUTH="1")
 
         lpm_dir = fixture / ".lpm"
         webhooks_dir = lpm_dir / "webhooks"
@@ -10979,68 +13207,920 @@ def scenario_install_tunnel_command() -> None:
             )
 
 
+def scenario_install_proxy_command() -> None:
+    fixture = reset_proxy_fixture().resolve()
+
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
+        home_path = Path(home_root)
+        scenario_env = smoke_home_env(
+            home_root,
+            LPM_CERT_TEST_TRUST_STORE_DIR=str(home_path / "test-trust-store"),
+        )
+
+        def write_proxy_config(payload: dict[str, object]) -> None:
+            (fixture / "lpm.json").write_text(
+                json.dumps(payload, indent=2) + "\n",
+                encoding="utf-8",
+            )
+
+        def run_proxy_json(
+            label: str,
+            args: list[str],
+            extra_env: dict[str, str] | None = None,
+        ) -> dict[str, object]:
+            result = run_command_result(
+                label,
+                fixture,
+                [str(LPM_BIN), "--json", "proxy", *args],
+                extra_env=extra_env or scenario_env,
+            )
+            if result.returncode != 0:
+                raise SmokeFailure(
+                    f"{label} failed with exit code {result.returncode}"
+                )
+            if result.stderr:
+                raise SmokeFailure(f"{label}: expected stderr to stay empty")
+            return json.loads(result.stdout)
+
+        def stop_proxy(label: str) -> dict[str, object]:
+            return run_proxy_json(label, ["stop"])
+
+        def read_proxy_status_without_logging() -> dict[str, object]:
+            result = subprocess.run(
+                [str(LPM_BIN), "--json", "proxy", "status"],
+                cwd=fixture,
+                env=merged_env(scenario_env),
+                capture_output=True,
+                text=True,
+            )
+            if result.returncode != 0:
+                raise SmokeFailure(
+                    "install/proxy route poll: proxy status returned non-zero"
+                )
+            if result.stderr:
+                raise SmokeFailure(
+                    "install/proxy route poll: expected proxy status stderr to stay empty"
+                )
+            return json.loads(result.stdout)
+
+        def parse_listener_port(listener: object, label: str) -> int:
+            if not isinstance(listener, str):
+                raise SmokeFailure(f"{label}: expected a listener URL string")
+            parsed = urlparse(listener)
+            if parsed.scheme not in {"http", "https"} or parsed.port is None:
+                raise SmokeFailure(
+                    f"{label}: expected a listener URL with scheme and port, got {listener!r}"
+                )
+            return parsed.port
+
+        def request_via_proxy(
+            listener: object,
+            host: str,
+            path: str,
+            *,
+            method: str = "GET",
+            body: str = "",
+            host_header: str | None = None,
+        ) -> tuple[int, dict[str, str], str]:
+            if not isinstance(listener, str):
+                raise SmokeFailure(
+                    f"install/proxy request: expected a listener URL string, got {listener!r}"
+                )
+
+            parsed = urlparse(listener)
+            if parsed.hostname is None or parsed.port is None:
+                raise SmokeFailure(
+                    f"install/proxy request: expected a listener host and port, got {listener!r}"
+                )
+
+            request_host = host_header or host
+            body_bytes = body.encode("utf-8")
+            request = (
+                f"{method} {path} HTTP/1.1\r\n"
+                f"Host: {request_host}\r\n"
+                "Connection: close\r\n"
+                f"Content-Length: {len(body_bytes)}\r\n"
+                + (
+                    "Content-Type: text/plain; charset=utf-8\r\n"
+                    if body_bytes
+                    else ""
+                )
+                +
+                "\r\n"
+            ).encode("utf-8") + body_bytes
+
+            with socket.create_connection((parsed.hostname, parsed.port), timeout=5) as raw_sock:
+                raw_sock.settimeout(5)
+                if parsed.scheme == "https":
+                    context = ssl._create_unverified_context()
+                    with context.wrap_socket(raw_sock, server_hostname=host) as tls_sock:
+                        tls_sock.sendall(request)
+                        response = http.client.HTTPResponse(tls_sock)
+                        response.begin()
+                        return (
+                            response.status,
+                            {key.lower(): value for key, value in response.getheaders()},
+                            response.read().decode("utf-8", errors="replace"),
+                        )
+
+                raw_sock.sendall(request)
+                response = http.client.HTTPResponse(raw_sock)
+                response.begin()
+                return (
+                    response.status,
+                    {key.lower(): value for key, value in response.getheaders()},
+                    response.read().decode("utf-8", errors="replace"),
+                )
+
+        def wait_for_proxy_response(label: str, fetch, matches) -> tuple[int, dict[str, str], str]:
+            deadline = time.monotonic() + 5
+            last_response: tuple[int, dict[str, str], str] | None = None
+            last_error: Exception | None = None
+            while time.monotonic() < deadline:
+                try:
+                    response = fetch()
+                except Exception as error:
+                    last_error = error
+                    time.sleep(0.1)
+                    continue
+                last_response = response
+                if matches(*response):
+                    return response
+                time.sleep(0.1)
+
+            if last_response is not None:
+                status, headers, body = last_response
+                raise SmokeFailure(
+                    f"{label}: expected the proxy response to settle to the documented contract"
+                    f"\nstatus: {status}\nheaders: {headers}\nbody: {body}"
+                )
+            raise SmokeFailure(f"{label}: proxy request never succeeded: {last_error}")
+
+        def wait_for_proxy_route(
+            process: subprocess.Popen[str],
+            host: str,
+        ) -> dict[str, object]:
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline:
+                status = read_proxy_status_without_logging()
+                routes = status.get("routes")
+                if isinstance(routes, list):
+                    route = next(
+                        (
+                            route
+                            for route in routes
+                            if isinstance(route, dict) and route.get("host") == host
+                        ),
+                        None,
+                    )
+                    if route is not None:
+                        return route
+                if process.poll() is not None:
+                    stdout, stderr = process.communicate()
+                    raise SmokeFailure(
+                        "install/proxy route registration: lpm dev exited before the proxy route appeared"
+                        f"\nstdout: {stdout}\nstderr: {stderr}"
+                    )
+                time.sleep(0.1)
+
+            if process.poll() is None:
+                process.kill()
+            stdout, stderr = process.communicate()
+            raise SmokeFailure(
+                "install/proxy route registration: proxy route did not appear before timeout"
+                f"\nstdout: {stdout}\nstderr: {stderr}"
+            )
+
+        def run_dev_for_host(
+            label: str,
+            host: str,
+            dev_port: int,
+        ) -> tuple[subprocess.Popen[str], dict[str, object]]:
+            write_proxy_config({"proxy": {"host": host}})
+            process = subprocess.Popen(
+                [
+                    str(LPM_BIN),
+                    "dev",
+                    "--yes",
+                    "--no-install",
+                    "--no-open",
+                    "--no-env-check",
+                    "--port",
+                    str(dev_port),
+                    "--",
+                    "--port",
+                    str(dev_port),
+                ],
+                cwd=fixture,
+                env=merged_env(scenario_env),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            route = wait_for_proxy_route(process, host)
+            return process, route
+
+        try:
+            status_absent = run_proxy_json(
+                "install/proxy status absent json",
+                ["status"],
+            )
+            if status_absent.get("success") is not True:
+                raise SmokeFailure(
+                    "install/proxy status absent json: expected success=true"
+                )
+            if status_absent.get("running") is not False:
+                raise SmokeFailure(
+                    "install/proxy status absent json: expected running=false"
+                )
+            for key in ["pid", "httpAddr", "httpRedirectAddr", "tlsAddr", "stateError"]:
+                if status_absent.get(key) is not None:
+                    raise SmokeFailure(
+                        f"install/proxy status absent json: expected {key}=null"
+                    )
+            if status_absent.get("routes") != []:
+                raise SmokeFailure(
+                    "install/proxy status absent json: expected routes=[]"
+                )
+            if status_absent.get("stale") is not False:
+                raise SmokeFailure(
+                    "install/proxy status absent json: expected stale=false"
+                )
+
+            list_absent = run_proxy_json(
+                "install/proxy list absent json",
+                ["list"],
+            )
+            if list_absent.get("success") is not True:
+                raise SmokeFailure(
+                    "install/proxy list absent json: expected success=true"
+                )
+            if list_absent.get("running") is not False:
+                raise SmokeFailure(
+                    "install/proxy list absent json: expected running=false"
+                )
+            if list_absent.get("routes") != []:
+                raise SmokeFailure(
+                    "install/proxy list absent json: expected routes=[]"
+                )
+
+            status_human_result = run_command_result(
+                "install/proxy status absent human",
+                fixture,
+                [str(LPM_BIN), "proxy", "status"],
+                extra_env=scenario_env,
+            )
+            if status_human_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/proxy status absent human failed with a non-zero exit code"
+                )
+            if status_human_result.stdout:
+                raise SmokeFailure(
+                    "install/proxy status absent human: expected stdout to stay empty"
+                )
+            human_status = status_human_result.stderr
+            require_contains(
+                human_status,
+                "Local proxy",
+                "install/proxy status absent human header",
+            )
+            require_contains(
+                human_status,
+                "not running",
+                "install/proxy status absent human running state",
+            )
+            require_contains(
+                human_status,
+                "No proxy routes",
+                "install/proxy status absent human route summary",
+            )
+
+            stop_absent = stop_proxy("install/proxy stop absent json")
+            if stop_absent.get("success") is not True:
+                raise SmokeFailure(
+                    "install/proxy stop absent json: expected success=true"
+                )
+            if stop_absent.get("stopped") is not False:
+                raise SmokeFailure(
+                    "install/proxy stop absent json: expected stopped=false"
+                )
+
+            detach_start = run_proxy_json(
+                "install/proxy start detach json",
+                ["start", "--detach", "--http-port", "0"],
+            )
+            if detach_start.get("success") is not True:
+                raise SmokeFailure(
+                    "install/proxy start detach json: expected success=true"
+                )
+            if detach_start.get("running") is not True:
+                raise SmokeFailure(
+                    "install/proxy start detach json: expected running=true"
+                )
+            if not isinstance(detach_start.get("pid"), int):
+                raise SmokeFailure(
+                    "install/proxy start detach json: expected a numeric pid"
+                )
+            if not isinstance(detach_start.get("httpAddr"), str):
+                raise SmokeFailure(
+                    "install/proxy start detach json: expected httpAddr to be present"
+                )
+            detach_stop = stop_proxy("install/proxy stop after detach json")
+            if detach_stop.get("stopped") is not True:
+                raise SmokeFailure(
+                    "install/proxy stop after detach json: expected stopped=true"
+                )
+
+            install_dry_run_result = run_command_result(
+                "install/proxy install dry-run json",
+                fixture,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "proxy",
+                    "install",
+                    "--tls-port",
+                    "9443",
+                    "--http-redirect-port",
+                    "8080",
+                ],
+                extra_env={**scenario_env, "LPM_PROXY_SERVICE_DRY_RUN": "1"},
+            )
+            if install_dry_run_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/proxy install dry-run json failed with a non-zero exit code"
+                )
+            if install_dry_run_result.stderr:
+                raise SmokeFailure(
+                    "install/proxy install dry-run json: expected stderr to stay empty"
+                )
+            install_dry_run = json.loads(install_dry_run_result.stdout)
+            expected_install_args = [
+                "proxy",
+                "start",
+                "--tls-port",
+                "9443",
+                "--http-redirect-port",
+                "8080",
+            ]
+            if install_dry_run.get("success") is not True:
+                raise SmokeFailure(
+                    "install/proxy install dry-run json: expected success=true"
+                )
+            if install_dry_run.get("action") != "install":
+                raise SmokeFailure(
+                    "install/proxy install dry-run json: expected action=install"
+                )
+            if install_dry_run.get("changed") is not False:
+                raise SmokeFailure(
+                    "install/proxy install dry-run json: expected changed=false"
+                )
+            if install_dry_run.get("dryRun") is not True:
+                raise SmokeFailure(
+                    "install/proxy install dry-run json: expected dryRun=true"
+                )
+            if install_dry_run.get("args") != expected_install_args:
+                raise SmokeFailure(
+                    "install/proxy install dry-run json: expected service args to match the requested listener plan"
+                )
+            if install_dry_run.get("privilegedForwarder") is not None:
+                raise SmokeFailure(
+                    "install/proxy install dry-run json: expected privilegedForwarder=null without --privileged-ports"
+                )
+
+            uninstall_dry_run_result = run_command_result(
+                "install/proxy uninstall dry-run json",
+                fixture,
+                [str(LPM_BIN), "--json", "proxy", "uninstall"],
+                extra_env={**scenario_env, "LPM_PROXY_SERVICE_DRY_RUN": "1"},
+            )
+            if uninstall_dry_run_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/proxy uninstall dry-run json failed with a non-zero exit code"
+                )
+            if uninstall_dry_run_result.stderr:
+                raise SmokeFailure(
+                    "install/proxy uninstall dry-run json: expected stderr to stay empty"
+                )
+            uninstall_dry_run = json.loads(uninstall_dry_run_result.stdout)
+            if uninstall_dry_run.get("success") is not True:
+                raise SmokeFailure(
+                    "install/proxy uninstall dry-run json: expected success=true"
+                )
+            if uninstall_dry_run.get("action") != "uninstall":
+                raise SmokeFailure(
+                    "install/proxy uninstall dry-run json: expected action=uninstall"
+                )
+            if uninstall_dry_run.get("changed") is not False:
+                raise SmokeFailure(
+                    "install/proxy uninstall dry-run json: expected changed=false"
+                )
+            if uninstall_dry_run.get("dryRun") is not True:
+                raise SmokeFailure(
+                    "install/proxy uninstall dry-run json: expected dryRun=true"
+                )
+
+            if os.name != "nt" and hasattr(os, "geteuid") and os.geteuid() != 0:
+                privileged_install_result = run_command_result(
+                    "install/proxy install privileged-ports dry-run json",
+                    fixture,
+                    [
+                        str(LPM_BIN),
+                        "--json",
+                        "proxy",
+                        "install",
+                        "--privileged-ports",
+                    ],
+                    extra_env={**scenario_env, "LPM_PROXY_SERVICE_DRY_RUN": "1"},
+                )
+                if privileged_install_result.returncode != 0:
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json failed with a non-zero exit code"
+                    )
+                if privileged_install_result.stderr:
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected stderr to stay empty"
+                    )
+                privileged_install = json.loads(privileged_install_result.stdout)
+                if privileged_install.get("success") is not True:
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected success=true"
+                    )
+                if privileged_install.get("action") != "install":
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected action=install"
+                    )
+                if privileged_install.get("dryRun") is not True:
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected dryRun=true"
+                    )
+                privileged_args = privileged_install.get("args") or []
+                if "--tls-port" not in privileged_args or "--http-redirect-port" not in privileged_args:
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected high-port listener args for the user service"
+                    )
+                if "443" in privileged_args or "80" in privileged_args:
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected external low ports to stay in the forwarder plan only"
+                    )
+                forwarder = privileged_install.get("privilegedForwarder")
+                if not isinstance(forwarder, dict):
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected a privilegedForwarder plan"
+                    )
+                if forwarder.get("service") != "dev.lpm.proxy.forwarder":
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected the dev.lpm.proxy.forwarder service name"
+                    )
+                forwarder_args = forwarder.get("args") or []
+                if forwarder_args[:3] != ["proxy", "forwarder", "--forwarder-config"]:
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected proxy forwarder args to start with the config flag"
+                    )
+                rules = forwarder.get("rules")
+                if not isinstance(rules, list) or len(rules) != 2:
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected exactly two forwarder rules"
+                    )
+                https_rule = next(
+                    (rule for rule in rules if isinstance(rule, dict) and rule.get("name") == "https"),
+                    None,
+                )
+                redirect_rule = next(
+                    (rule for rule in rules if isinstance(rule, dict) and rule.get("name") == "httpRedirect"),
+                    None,
+                )
+                if https_rule is None or redirect_rule is None:
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected https and httpRedirect forwarder rules"
+                    )
+                if https_rule.get("listenAddr") != "127.0.0.1:443":
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected the https forwarder to claim 127.0.0.1:443"
+                    )
+                if redirect_rule.get("listenAddr") != "127.0.0.1:80":
+                    raise SmokeFailure(
+                        "install/proxy install privileged-ports dry-run json: expected the redirect forwarder to claim 127.0.0.1:80"
+                    )
+
+            write_proxy_config(
+                {
+                    "proxy": {
+                        "host": "app.localhost",
+                        "port": 0,
+                        "httpRedirect": False,
+                    }
+                }
+            )
+            config_default_start = run_proxy_json(
+                "install/proxy start uses lpm.json defaults",
+                ["start", "--detach"],
+            )
+            if not isinstance(config_default_start.get("tlsAddr"), str):
+                raise SmokeFailure(
+                    "install/proxy start uses lpm.json defaults: expected tlsAddr to be present"
+                )
+            if config_default_start.get("httpRedirectAddr") is not None:
+                raise SmokeFailure(
+                    "install/proxy start uses lpm.json defaults: expected httpRedirectAddr=null when httpRedirect=false"
+                )
+            config_default_stop = stop_proxy(
+                "install/proxy stop after lpm.json defaults json"
+            )
+            if config_default_stop.get("stopped") is not True:
+                raise SmokeFailure(
+                    "install/proxy stop after lpm.json defaults json: expected stopped=true"
+                )
+
+            http_tls_start = run_proxy_json(
+                "install/proxy start http+tls json",
+                ["start", "--detach", "--tls-port", "0", "--http-port", "0"],
+            )
+            http_listener = http_tls_start.get("httpAddr")
+            tls_listener = http_tls_start.get("tlsAddr")
+            if not isinstance(http_listener, str) or not isinstance(tls_listener, str):
+                raise SmokeFailure(
+                    "install/proxy start http+tls json: expected both httpAddr and tlsAddr"
+                )
+            http_tls_dev_port = reserve_then_release_port()
+            http_tls_process: subprocess.Popen[str] | None = None
+            try:
+                http_tls_process, route = run_dev_for_host(
+                    "install/proxy proxy.host route",
+                    "app.localhost",
+                    http_tls_dev_port,
+                )
+                if route.get("host") != "app.localhost":
+                    raise SmokeFailure(
+                        "install/proxy proxy.host route: expected the proxy status route to record app.localhost"
+                    )
+                _, _, http_body = wait_for_proxy_response(
+                    "install/proxy proxy.host route http",
+                    lambda: request_via_proxy(
+                        http_listener,
+                        "app.localhost",
+                        "/through?ok=1",
+                        method="GET",
+                        host_header="app.localhost",
+                    ),
+                    lambda status, _headers, body: status == 200
+                    and "GET /through?ok=1" in body
+                    and "proto=http" in body,
+                )
+                tls_port = parse_listener_port(
+                    tls_listener,
+                    "install/proxy proxy.host route tls listener",
+                )
+                _, _, tls_body = wait_for_proxy_response(
+                    "install/proxy proxy.host route https",
+                    lambda: request_via_proxy(
+                        tls_listener,
+                        "app.localhost",
+                        "/secure?ok=1",
+                        method="GET",
+                        host_header=f"app.localhost:{tls_port}",
+                    ),
+                    lambda status, _headers, body: status == 200
+                    and "GET /secure?ok=1" in body
+                    and "proto=https" in body,
+                )
+                http_tls_stdout, http_tls_stderr = http_tls_process.communicate(timeout=15)
+                if http_tls_process.returncode != 0:
+                    raise SmokeFailure(
+                        "install/proxy proxy.host route: expected lpm dev to exit successfully"
+                        f"\nstdout: {http_tls_stdout}\nstderr: {http_tls_stderr}"
+                    )
+            finally:
+                if http_tls_process is not None and http_tls_process.poll() is None:
+                    http_tls_process.kill()
+                    http_tls_process.wait(timeout=5)
+                http_tls_stop = stop_proxy(
+                    "install/proxy stop after http+tls route json"
+                )
+                if http_tls_stop.get("stopped") is not True:
+                    raise SmokeFailure(
+                        "install/proxy stop after http+tls route json: expected stopped=true"
+                    )
+
+            redirect_start = run_proxy_json(
+                "install/proxy start redirect json",
+                ["start", "--detach", "--tls-port", "0", "--http-redirect-port", "0"],
+            )
+            redirect_listener = redirect_start.get("httpRedirectAddr")
+            redirect_tls_listener = redirect_start.get("tlsAddr")
+            if not isinstance(redirect_listener, str) or not isinstance(redirect_tls_listener, str):
+                raise SmokeFailure(
+                    "install/proxy start redirect json: expected both tlsAddr and httpRedirectAddr"
+                )
+            redirect_tls_port = parse_listener_port(
+                redirect_tls_listener,
+                "install/proxy redirect tls listener",
+            )
+            redirect_dev_port = reserve_then_release_port()
+            redirect_process: subprocess.Popen[str] | None = None
+            try:
+                redirect_process, route = run_dev_for_host(
+                    "install/proxy redirect route",
+                    "app.localhost",
+                    redirect_dev_port,
+                )
+                if route.get("host") != "app.localhost":
+                    raise SmokeFailure(
+                        "install/proxy redirect route: expected the proxy status route to record app.localhost"
+                    )
+                expected_location = (
+                    f"https://app.localhost:{redirect_tls_port}/login?next=/app"
+                )
+                wait_for_proxy_response(
+                    "install/proxy redirect route http",
+                    lambda: request_via_proxy(
+                        redirect_listener,
+                        "app.localhost",
+                        "/login?next=/app",
+                        method="GET",
+                        host_header="app.localhost",
+                    ),
+                    lambda status, headers, _body: status == 301
+                    and headers.get("location") == expected_location,
+                )
+                redirect_stdout, redirect_stderr = redirect_process.communicate(timeout=15)
+                if redirect_process.returncode != 0:
+                    raise SmokeFailure(
+                        "install/proxy redirect route: expected lpm dev to exit successfully"
+                        f"\nstdout: {redirect_stdout}\nstderr: {redirect_stderr}"
+                    )
+            finally:
+                if redirect_process is not None and redirect_process.poll() is None:
+                    redirect_process.kill()
+                    redirect_process.wait(timeout=5)
+                redirect_stop = stop_proxy(
+                    "install/proxy stop after redirect route json"
+                )
+                if redirect_stop.get("stopped") is not True:
+                    raise SmokeFailure(
+                        "install/proxy stop after redirect route json: expected stopped=true"
+                    )
+        finally:
+            cleanup_result = subprocess.run(
+                [str(LPM_BIN), "--json", "proxy", "stop"],
+                cwd=fixture,
+                env=merged_env(scenario_env),
+                capture_output=True,
+                text=True,
+            )
+            if cleanup_result.returncode == 0 and cleanup_result.stdout:
+                try:
+                    cleanup_envelope = json.loads(cleanup_result.stdout)
+                except json.JSONDecodeError:
+                    cleanup_envelope = None
+                if isinstance(cleanup_envelope, dict) and cleanup_envelope.get("stopped"):
+                    sys.stdout.write(cleanup_result.stdout)
+            reset_proxy_fixture()
+
+
+def scenario_install_hosts_command() -> None:
+    fixture = reset_hosts_fixture().resolve()
+
+    original_hosts = (
+        "127.0.0.1 localhost\n\n"
+        "# >>> lpm:project-abc >>>\n"
+        "127.0.0.1 api.test\n"
+        "# <<< lpm:project-abc <<<\n\n"
+        "10.0.0.1 router\n"
+        "# >>> lpm:project-def >>>\n"
+        "127.0.0.1 web.test\n"
+        "# <<< lpm:project-def <<<\n"
+    )
+    refusal_hosts = (
+        "127.0.0.1 localhost\n"
+        "# >>> lpm:project-abc >>>\n"
+        "127.0.0.1 api.test\n"
+        "# <<< lpm:project-abc <<<\n"
+    )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-hosts-clean-") as home_root:
+        home_path = Path(home_root)
+        hosts_path = fixture / "hosts"
+        hosts_path.write_text(original_hosts, encoding="utf-8")
+        clean_env = smoke_home_env(
+            home_root,
+            LPM_HOSTS_FILE=str(hosts_path),
+            LPM_FORCE_FILE_AUTH="1",
+        )
+
+        clean_result = run_command_result(
+            "install/hosts clean json",
+            fixture,
+            [str(LPM_BIN), "--json", "hosts", "clean", "--yes"],
+            extra_env=clean_env,
+        )
+        if clean_result.returncode != 0:
+            raise SmokeFailure(
+                "install/hosts clean json failed with exit code "
+                f"{clean_result.returncode}"
+            )
+        if clean_result.stderr:
+            raise SmokeFailure(
+                "install/hosts clean json: expected stderr to stay empty"
+            )
+        clean_envelope = json.loads(clean_result.stdout)
+        if clean_envelope.get("success") is not True:
+            raise SmokeFailure("install/hosts clean json: expected success=true")
+        if clean_envelope.get("cleaned") is not True:
+            raise SmokeFailure("install/hosts clean json: expected cleaned=true")
+        if clean_envelope.get("removedBlocks") != 2:
+            raise SmokeFailure(
+                "install/hosts clean json: expected removedBlocks=2"
+            )
+        if clean_envelope.get("hostsFile") != str(hosts_path):
+            raise SmokeFailure(
+                "install/hosts clean json: expected hostsFile to match the configured fixture path"
+            )
+
+        backup_path = home_path / ".lpm" / "hosts.bak"
+        if clean_envelope.get("backupPath") != str(backup_path):
+            raise SmokeFailure(
+                "install/hosts clean json: expected backupPath to match the isolated LPM_HOME backup file"
+            )
+        require_exists(backup_path)
+        if hosts_path.read_text(encoding="utf-8") != "127.0.0.1 localhost\n\n10.0.0.1 router\n":
+            raise SmokeFailure(
+                "install/hosts clean json: expected only the unmanaged hosts entries to remain"
+            )
+        if backup_path.read_text(encoding="utf-8") != original_hosts:
+            raise SmokeFailure(
+                "install/hosts clean json: expected the backup file to preserve the original hosts content"
+            )
+
+    fixture = reset_hosts_fixture().resolve()
+
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-hosts-refusal-") as home_root:
+        home_path = Path(home_root)
+        hosts_path = fixture / "hosts"
+        hosts_path.write_text(refusal_hosts, encoding="utf-8")
+        refusal_env = smoke_home_env(
+            home_root,
+            LPM_HOSTS_FILE=str(hosts_path),
+            LPM_FORCE_FILE_AUTH="1",
+        )
+
+        refusal_args = [str(LPM_BIN), "hosts", "clean"]
+        log("install/hosts clean requires yes: " + " ".join(refusal_args))
+        refusal_result = subprocess.run(
+            refusal_args,
+            cwd=fixture,
+            env=merged_env(refusal_env),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+        )
+        if refusal_result.stdout:
+            sys.stdout.write(refusal_result.stdout)
+        if refusal_result.stderr:
+            sys.stderr.write(refusal_result.stderr)
+        if refusal_result.returncode == 0:
+            raise SmokeFailure(
+                "install/hosts clean requires yes: expected a non-zero exit without --yes"
+            )
+        require_contains(
+            refusal_result.stderr,
+            "non-interactive shell: pass `--yes` to consent",
+            "install/hosts clean requires yes consent guidance",
+        )
+        require_contains(
+            refusal_result.stderr,
+            "to removing 1",
+            "install/hosts clean requires yes block count",
+        )
+        require_contains(
+            refusal_result.stderr,
+            "LPM-managed hosts file block",
+            "install/hosts clean requires yes managed block wording",
+        )
+        if hosts_path.read_text(encoding="utf-8") != refusal_hosts:
+            raise SmokeFailure(
+                "install/hosts clean requires yes: expected the hosts file to stay unchanged"
+            )
+        require_not_exists(home_path / ".lpm" / "hosts.bak")
+
+    reset_hosts_fixture()
+
+
 def scenario_install_ports_command() -> None:
     fixture = reset_ports_fixture().resolve()
 
     with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         lpm_home = Path(home_root) / ".lpm"
-        scenario_env = {
-            "HOME": home_root,
-            "LPM_HOME": str(lpm_home),
-        }
-        busy_port = reserve_then_release_port()
-        free_port = reserve_then_release_port()
-        listener_process = subprocess.Popen(
-            [
-                sys.executable,
-                "-c",
-                (
-                    "import socket, sys, time\n"
-                    "sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
-                    "sock.bind(('127.0.0.1', int(sys.argv[1])))\n"
-                    "sock.listen()\n"
-                    "print('ready', flush=True)\n"
-                    "time.sleep(600)\n"
-                ),
-                str(busy_port),
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-        )
+        scenario_env = smoke_home_env(home_root)
+        listener_processes: list[subprocess.Popen[str]] = []
 
-        try:
-            if listener_process.stdout is None:
-                raise SmokeFailure(
-                    "install/ports busy listener: expected a readable stdout pipe"
-                )
-            ready_line = listener_process.stdout.readline().strip()
+        def spawn_listener_process(
+            label: str,
+            ports: list[int],
+        ) -> subprocess.Popen[str]:
+            process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-c",
+                    (
+                        "import socket, sys, time\n"
+                        "sockets = []\n"
+                        "try:\n"
+                        "    for raw_port in sys.argv[1:]:\n"
+                        "        sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)\n"
+                        "        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)\n"
+                        "        sock.bind(('127.0.0.1', int(raw_port)))\n"
+                        "        sock.listen()\n"
+                        "        sockets.append(sock)\n"
+                        "    print('ready', flush=True)\n"
+                        "    time.sleep(600)\n"
+                        "finally:\n"
+                        "    for sock in sockets:\n"
+                        "        sock.close()\n"
+                    ),
+                    *[str(port) for port in ports],
+                ],
+                cwd=fixture,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            listener_processes.append(process)
+
+            if process.stdout is None:
+                raise SmokeFailure(f"{label}: expected a readable stdout pipe")
+
+            ready_line = process.stdout.readline().strip()
             if ready_line != "ready":
                 stderr_output = ""
-                if listener_process.stderr is not None:
-                    stderr_output = listener_process.stderr.read().strip()
+                if process.stderr is not None:
+                    stderr_output = process.stderr.read().strip()
                 raise SmokeFailure(
-                    "install/ports busy listener failed to bind the seeded port"
+                    f"{label}: failed to bind the seeded port set"
                     f"\nstdout: {ready_line!r}\nstderr: {stderr_output!r}"
                 )
 
-            (fixture / "lpm.json").write_text(
-                json.dumps(
-                    {
-                        "services": {
-                            "web": {"command": "node web.js", "port": busy_port},
-                            "api": {"command": "node api.js", "port": free_port},
-                            "db": {
-                                "command": "docker compose up postgres",
-                                "readyPort": 5432,
-                            },
-                        }
-                    },
-                    indent=2,
-                )
-                + "\n",
-                encoding="utf-8",
+            return process
+
+        def wait_for_listener_exit(
+            process: subprocess.Popen[str],
+            label: str,
+        ) -> None:
+            process.wait(timeout=5)
+            if process.returncode is None:
+                raise SmokeFailure(f"{label}: expected the listener process to exit")
+
+        def find_port_entry(
+            rows: list[dict[str, object]],
+            port: int,
+            context: str,
+        ) -> dict[str, object]:
+            for row in rows:
+                if row.get("port") == port:
+                    return row
+            raise SmokeFailure(f"{context}: expected a row for port {port}")
+
+        busy_port = reserve_then_release_port()
+        free_port = reserve_then_release_port()
+        range_prompt_start = reserve_then_release_port()
+        range_prompt_end = reserve_then_release_port()
+        range_yes_start = reserve_then_release_port()
+        range_yes_end = reserve_then_release_port()
+        pid_kill_port = reserve_then_release_port()
+        listener_process = spawn_listener_process(
+            "install/ports busy listener",
+            [busy_port],
+        )
+
+        package_json = {
+            "name": "ports-command-smoke",
+            "private": True,
+            "version": "0.0.0",
+            "devDependencies": {
+                "next": "^16.0.0",
+            },
+        }
+        write_package_json(fixture / "package.json", package_json)
+
+        lpm_json_text = (
+            json.dumps(
+                {
+                    "services": {
+                        "web": {"command": "node web.js", "port": busy_port},
+                        "api": {"command": "node api.js", "port": free_port},
+                        "db": {
+                            "command": "docker compose up postgres",
+                            "readyPort": 5432,
+                        },
+                    }
+                },
+                indent=2,
             )
+            + "\n"
+        )
+
+        try:
+            (fixture / "lpm.json").write_text(lpm_json_text, encoding="utf-8")
 
             list_result = run_command_result(
                 "install/ports list json",
@@ -11075,13 +14155,216 @@ def scenario_install_ports_command() -> None:
                 [str(LPM_BIN), "ports"],
                 extra_env=scenario_env,
             )
-            require_contains(human_output, "Service Ports", "install/ports human header")
+            require_contains(human_output, "Service", "install/ports human header")
+            require_contains(human_output, "Port", "install/ports human port header")
+            require_contains(human_output, "Status", "install/ports human status header")
             require_contains(human_output, "web", "install/ports human service web")
             require_contains(human_output, "api", "install/ports human service api")
-            require_contains(human_output, f":{busy_port}", "install/ports human busy port")
-            require_contains(human_output, f":{free_port}", "install/ports human free port")
-            require_contains(human_output, "in use", "install/ports human in-use status")
-            require_contains(human_output, "free", "install/ports human free status")
+            require_contains(human_output, str(busy_port), "install/ports human busy port")
+            require_contains(human_output, str(free_port), "install/ports human free port")
+            require_contains(human_output, "● listening", "install/ports human listening status")
+            require_contains(human_output, "● ready", "install/ports human ready status")
+
+            all_result = run_command_result(
+                "install/ports all json",
+                fixture,
+                [str(LPM_BIN), "--json", "ports", "all"],
+                extra_env=scenario_env,
+            )
+            if all_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/ports all json failed with exit code {all_result.returncode}"
+                )
+            if all_result.stderr.strip():
+                raise SmokeFailure(
+                    "install/ports all json: expected machine-readable JSON to stay on stdout"
+                )
+            all_envelope = json.loads(all_result.stdout)
+            if all_envelope.get("success") is not True:
+                raise SmokeFailure("install/ports all json: expected success=true")
+            if all_envelope.get("scope") != "all":
+                raise SmokeFailure("install/ports all json: expected scope=all")
+            all_row = find_port_entry(
+                all_envelope.get("ports", []),
+                busy_port,
+                "install/ports all json",
+            )
+            if all_row.get("status") != "listening":
+                raise SmokeFailure(
+                    "install/ports all json: expected the seeded listener to report status=listening"
+                )
+            if all_row.get("pid") != listener_process.pid:
+                raise SmokeFailure(
+                    "install/ports all json: expected the seeded listener PID to round-trip"
+                )
+            if all_row.get("cwd") != str(fixture):
+                raise SmokeFailure(
+                    "install/ports all json: expected cwd enrichment for the seeded listener"
+                )
+            if all_row.get("projectDir") != str(fixture):
+                raise SmokeFailure(
+                    "install/ports all json: expected projectDir enrichment for the seeded listener"
+                )
+            if all_row.get("project") != "ports-command-smoke":
+                raise SmokeFailure(
+                    "install/ports all json: expected the package name to label the project"
+                )
+            if all_row.get("framework") != "Next.js":
+                raise SmokeFailure(
+                    "install/ports all json: expected Next.js framework detection for the seeded package.json"
+                )
+            if not isinstance(all_row.get("command"), str) or not all_row.get("command"):
+                raise SmokeFailure(
+                    "install/ports all json: expected command enrichment for the seeded listener"
+                )
+            if not isinstance(all_row.get("uptime"), str) or not all_row.get("uptime"):
+                raise SmokeFailure(
+                    "install/ports all json: expected uptime enrichment for the seeded listener"
+                )
+
+            all_alias_result = run_command_result(
+                "install/ports --all json",
+                fixture,
+                [str(LPM_BIN), "--json", "ports", "--all"],
+                extra_env=scenario_env,
+            )
+            if all_alias_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/ports --all json failed with exit code "
+                    f"{all_alias_result.returncode}"
+                )
+            all_alias_envelope = json.loads(all_alias_result.stdout)
+            if all_alias_envelope.get("scope") != "all":
+                raise SmokeFailure("install/ports --all json: expected scope=all")
+            _ = find_port_entry(
+                all_alias_envelope.get("ports", []),
+                busy_port,
+                "install/ports --all json",
+            )
+
+            inspect_bare_result = run_command_result(
+                "install/ports inspect bare json",
+                fixture,
+                [str(LPM_BIN), "--json", "ports", str(busy_port)],
+                extra_env=scenario_env,
+            )
+            if inspect_bare_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/ports inspect bare json failed with exit code "
+                    f"{inspect_bare_result.returncode}"
+                )
+            if inspect_bare_result.stderr.strip():
+                raise SmokeFailure(
+                    "install/ports inspect bare json: expected machine-readable JSON to stay on stdout"
+                )
+            inspect_bare_envelope = json.loads(inspect_bare_result.stdout)
+            if inspect_bare_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/ports inspect bare json: expected success=true"
+                )
+            if inspect_bare_envelope.get("port") != busy_port:
+                raise SmokeFailure(
+                    "install/ports inspect bare json: expected the inspected port to match the seeded listener"
+                )
+            if inspect_bare_envelope.get("status") != "listening":
+                raise SmokeFailure(
+                    "install/ports inspect bare json: expected status=listening"
+                )
+            inspect_bare_listener = find_port_entry(
+                inspect_bare_envelope.get("listeners", []),
+                busy_port,
+                "install/ports inspect bare json",
+            )
+            if inspect_bare_listener.get("pid") != listener_process.pid:
+                raise SmokeFailure(
+                    "install/ports inspect bare json: expected the seeded listener PID"
+                )
+            if inspect_bare_listener.get("cwd") != str(fixture):
+                raise SmokeFailure(
+                    "install/ports inspect bare json: expected cwd enrichment"
+                )
+            if inspect_bare_listener.get("project") != "ports-command-smoke":
+                raise SmokeFailure(
+                    "install/ports inspect bare json: expected the package name to label the project"
+                )
+            if inspect_bare_listener.get("framework") != "Next.js":
+                raise SmokeFailure(
+                    "install/ports inspect bare json: expected Next.js framework detection"
+                )
+
+            inspect_explicit_result = run_command_result(
+                "install/ports inspect explicit json",
+                fixture,
+                [str(LPM_BIN), "--json", "ports", "inspect", str(busy_port)],
+                extra_env=scenario_env,
+            )
+            if inspect_explicit_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/ports inspect explicit json failed with exit code "
+                    f"{inspect_explicit_result.returncode}"
+                )
+            inspect_explicit_envelope = json.loads(inspect_explicit_result.stdout)
+            if inspect_explicit_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/ports inspect explicit json: expected success=true"
+                )
+            if inspect_explicit_envelope.get("port") != busy_port:
+                raise SmokeFailure(
+                    "install/ports inspect explicit json: expected the inspected port to match the seeded listener"
+                )
+            inspect_explicit_listener = find_port_entry(
+                inspect_explicit_envelope.get("listeners", []),
+                busy_port,
+                "install/ports inspect explicit json",
+            )
+            if inspect_explicit_listener.get("pid") != listener_process.pid:
+                raise SmokeFailure(
+                    "install/ports inspect explicit json: expected the seeded listener PID"
+                )
+
+            (fixture / "lpm.json").write_text(
+                json.dumps({"services": {}}, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            fallback_result = run_command_result(
+                "install/ports project fallback json",
+                fixture,
+                [str(LPM_BIN), "--json", "ports"],
+                extra_env=scenario_env,
+            )
+            if fallback_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/ports project fallback json failed with exit code "
+                    f"{fallback_result.returncode}"
+                )
+            fallback_envelope = json.loads(fallback_result.stdout)
+            if fallback_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/ports project fallback json: expected success=true"
+                )
+            if fallback_envelope.get("scope") != "project":
+                raise SmokeFailure(
+                    "install/ports project fallback json: expected scope=project"
+                )
+            fallback_row = find_port_entry(
+                fallback_envelope.get("ports", []),
+                busy_port,
+                "install/ports project fallback json",
+            )
+            if fallback_row.get("cwd") != str(fixture):
+                raise SmokeFailure(
+                    "install/ports project fallback json: expected cwd enrichment for the project-scoped fallback"
+                )
+            if fallback_row.get("project") != "ports-command-smoke":
+                raise SmokeFailure(
+                    "install/ports project fallback json: expected the package name to label the project"
+                )
+            if fallback_row.get("framework") != "Next.js":
+                raise SmokeFailure(
+                    "install/ports project fallback json: expected Next.js framework detection"
+                )
+
+            (fixture / "lpm.json").write_text(lpm_json_text, encoding="utf-8")
 
             missing_kill_output = run_command_expect_failure(
                 "install/ports kill missing",
@@ -11091,8 +14374,13 @@ def scenario_install_ports_command() -> None:
             )
             require_contains(
                 missing_kill_output,
-                "missing port number. Usage: lpm ports kill <port>",
+                "missing target. Usage: lpm ports kill <port|start-end>",
                 "install/ports kill missing usage",
+            )
+            require_contains(
+                missing_kill_output,
+                "lpm ports kill --pid <pid>",
+                "install/ports kill missing pid usage",
             )
 
             kill_busy_result = run_command_result(
@@ -11163,6 +14451,126 @@ def scenario_install_ports_command() -> None:
                     "install/ports kill already-free json: expected the stable already_free envelope"
                 )
 
+            range_prompt_process = spawn_listener_process(
+                "install/ports range prompt listener",
+                [range_prompt_start, range_prompt_end],
+            )
+            interactive_range_output = run_interactive_command(
+                "install/ports kill range interactive",
+                fixture,
+                [
+                    str(LPM_BIN),
+                    "ports",
+                    "kill",
+                    f"{range_prompt_start}-{range_prompt_end}",
+                ],
+                prompts=[
+                    (
+                        f"Kill 1 process(es) listening in {range_prompt_start}-{range_prompt_end}?",
+                        "y\n",
+                    )
+                ],
+                extra_env=scenario_env,
+            )
+            require_contains(
+                interactive_range_output,
+                f"Kill 1 process(es) listening in {range_prompt_start}-{range_prompt_end}?",
+                "install/ports kill range interactive prompt",
+            )
+            require_contains(
+                interactive_range_output,
+                f"Killed 1 process in {range_prompt_start}-{range_prompt_end}",
+                "install/ports kill range interactive completion",
+            )
+            wait_for_listener_exit(
+                range_prompt_process,
+                "install/ports kill range interactive",
+            )
+
+            range_process = spawn_listener_process(
+                "install/ports range yes listener",
+                [range_yes_start, range_yes_end],
+            )
+
+            kill_range_result = run_command_result(
+                "install/ports kill range yes json",
+                fixture,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "ports",
+                    "kill",
+                    f"{range_yes_start}-{range_yes_end}",
+                    "--yes",
+                ],
+                extra_env=scenario_env,
+            )
+            if kill_range_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/ports kill range yes json failed with exit code "
+                    f"{kill_range_result.returncode}"
+                )
+            kill_range_envelope = json.loads(kill_range_result.stdout)
+            if kill_range_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/ports kill range yes json: expected success=true"
+                )
+            if kill_range_envelope.get("range") != {
+                "start": range_yes_start,
+                "end": range_yes_end,
+            }:
+                raise SmokeFailure(
+                    "install/ports kill range yes json: expected the inclusive range envelope"
+                )
+            killed_range = kill_range_envelope.get("killed", [])
+            if len(killed_range) != 1:
+                raise SmokeFailure(
+                    "install/ports kill range yes json: expected a single deduped killed process entry"
+                )
+            if killed_range[0].get("pid") != range_process.pid:
+                raise SmokeFailure(
+                    "install/ports kill range yes json: expected the deduped PID to match the seeded range listener"
+                )
+            if sorted(killed_range[0].get("ports", [])) != sorted([range_yes_start, range_yes_end]):
+                raise SmokeFailure(
+                    "install/ports kill range yes json: expected both seeded ports to be attributed to the killed PID"
+                )
+            wait_for_listener_exit(range_process, "install/ports kill range yes json")
+
+            pid_process = spawn_listener_process(
+                "install/ports pid listener",
+                [pid_kill_port],
+            )
+            kill_pid_result = run_command_result(
+                "install/ports kill pid json",
+                fixture,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "ports",
+                    "kill",
+                    "--pid",
+                    str(pid_process.pid),
+                ],
+                extra_env=scenario_env,
+            )
+            if kill_pid_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/ports kill pid json failed with exit code {kill_pid_result.returncode}"
+                )
+            kill_pid_envelope = json.loads(kill_pid_result.stdout)
+            if kill_pid_envelope.get("success") is not True:
+                raise SmokeFailure("install/ports kill pid json: expected success=true")
+            if kill_pid_envelope.get("pid") != pid_process.pid:
+                raise SmokeFailure(
+                    "install/ports kill pid json: expected the killed PID to match the seeded listener"
+                )
+            if pid_kill_port not in kill_pid_envelope.get("ports", []):
+                raise SmokeFailure(
+                    "install/ports kill pid json: expected the seeded listener port to be attributed to the killed PID"
+                )
+            wait_for_listener_exit(pid_process, "install/ports kill pid json")
+
             ports_toml = lpm_home / "ports.toml"
             ports_toml.parent.mkdir(parents=True, exist_ok=True)
             current_key = project_port_override_key(fixture)
@@ -11201,14 +14609,73 @@ def scenario_install_ports_command() -> None:
                 raise SmokeFailure(
                     "install/ports reset json: expected unrelated project overrides to be preserved"
                 )
+
+            host_only_assigned_port = reserve_then_release_port()
+            (fixture / "lpm.json").write_text(
+                (
+                    json.dumps(
+                        {
+                            "services": {
+                                "web": {
+                                    "command": "node server.js",
+                                    "host": "web.localhost",
+                                }
+                            }
+                        },
+                        indent=2,
+                    )
+                    + "\n"
+                ),
+                encoding="utf-8",
+            )
+            ports_toml.write_text(
+                (
+                    f"[{current_key}]\n"
+                    f"web = {host_only_assigned_port}\n"
+                ),
+                encoding="utf-8",
+            )
+
+            host_only_list_result = run_command_result(
+                "install/ports host-only persisted assignment json",
+                fixture,
+                [str(LPM_BIN), "ports", "list", "--json"],
+                extra_env=scenario_env,
+            )
+            if host_only_list_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/ports host-only persisted assignment json failed with exit code "
+                    f"{host_only_list_result.returncode}"
+                )
+            if host_only_list_result.stderr:
+                raise SmokeFailure(
+                    "install/ports host-only persisted assignment json: expected stderr to stay empty"
+                )
+            host_only_list_envelope = json.loads(host_only_list_result.stdout)
+            if host_only_list_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/ports host-only persisted assignment json: expected success=true"
+                )
+            expected_host_only_rows = [
+                {
+                    "service": "web",
+                    "port": host_only_assigned_port,
+                    "status": "free",
+                }
+            ]
+            if host_only_list_envelope.get("ports") != expected_host_only_rows:
+                raise SmokeFailure(
+                    "install/ports host-only persisted assignment json: expected the persisted host-only port assignment row"
+                )
         finally:
-            if listener_process.poll() is None:
-                listener_process.terminate()
-                try:
-                    listener_process.wait(timeout=5)
-                except subprocess.TimeoutExpired:
-                    listener_process.kill()
-                    listener_process.wait(timeout=5)
+            for process in reversed(listener_processes):
+                if process.poll() is None:
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                        process.wait(timeout=5)
             reset_ports_fixture()
 
 
@@ -11410,15 +14877,45 @@ def scenario_install_cert_command() -> None:
             require_contains(human_status, "Root CA", "install/cert status human header")
             require_contains(
                 human_status,
-                "Project Certificate",
+                "Project cert",
                 "install/cert status human project header",
             )
-            require_contains(human_status, "hostnames", "install/cert status human hostnames label")
+            require_contains(human_status, "hosts", "install/cert status human hostnames label")
             require_contains(
                 human_status,
                 "myapp.local",
                 "install/cert status human requested hostname",
             )
+
+            constrained_fixture = reset_cert_fixture().resolve()
+            constrained_project_cert = constrained_fixture / ".lpm" / "certs" / "cert.pem"
+            (constrained_fixture / "lpm.json").write_text(
+                '{"cert":{"extraPermittedDns":["myapp.local"]}}\n',
+                encoding="utf-8",
+            )
+            constrained_result = run_command_result(
+                "install/cert generate constrained chain json",
+                constrained_fixture,
+                [str(LPM_BIN), "cert", "generate", "--json"],
+                extra_env=scenario_env,
+            )
+            if constrained_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/cert generate constrained chain json failed with exit code "
+                    f"{constrained_result.returncode}"
+                )
+            constrained_envelope = json.loads(constrained_result.stdout)
+            if constrained_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/cert generate constrained chain json: expected success=true"
+                )
+            cert_blocks = constrained_project_cert.read_text(encoding="utf-8").count(
+                "-----BEGIN CERTIFICATE-----"
+            )
+            if cert_blocks != 2:
+                raise SmokeFailure(
+                    "install/cert generate constrained chain json: expected a leaf plus constrained intermediate chain"
+                )
         finally:
             reset_cert_fixture()
 
@@ -11430,11 +14927,11 @@ def scenario_install_doctor_command() -> None:
 
     with MockRegistry([]) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
-        scenario_env = {
-            "LPM_HOME": lpm_home,
-            "LPM_PROVENANCE_ENFORCE": "deny",
-        }
+    ) as home_root:
+        scenario_env = smoke_home_env(
+            home_root,
+            LPM_PROVENANCE_ENFORCE="deny",
+        )
         registry_args = ["--registry", registry.registry_url, "--insecure"]
 
         fixture = reset_doctor_fixture()
@@ -11607,9 +15104,9 @@ def scenario_install_doctor_command() -> None:
 def scenario_install_health_command() -> None:
     with MockRegistry([]) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
         fixture = reset_health_fixture()
-        scenario_env = {"LPM_HOME": lpm_home}
+        scenario_env = smoke_home_env(home_root)
         registry_args = ["--registry", registry.registry_url, "--insecure"]
 
         healthy_result = run_command_result(
@@ -11668,14 +15165,11 @@ def scenario_install_setup_commands() -> None:
 
     with MockRegistry([], token_create_response=token_response) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home, tempfile.TemporaryDirectory(prefix="lpm-setup-ci-") as ci_project, tempfile.TemporaryDirectory(
+    ) as home_root, tempfile.TemporaryDirectory(prefix="lpm-setup-ci-") as ci_project, tempfile.TemporaryDirectory(
         prefix="lpm-setup-local-"
     ) as local_project:
         registry_base = registry.registry_url.rstrip("/")
-        scenario_env = {
-            "LPM_HOME": lpm_home,
-            "LPM_TOKEN": "lpm_ci_smoke_token",
-        }
+        scenario_env = smoke_home_env(home_root, LPM_TOKEN="lpm_ci_smoke_token")
 
         ci_project_path = Path(ci_project)
         local_project_path = Path(local_project)
@@ -11787,9 +15281,2051 @@ def scenario_install_setup_commands() -> None:
             )
 
 
+def scenario_install_ci_commands() -> None:
+    with tempfile.TemporaryDirectory(prefix="lpm-ci-home-") as home_root:
+        common_env = smoke_home_env(home_root)
+
+        with tempfile.TemporaryDirectory(prefix="lpm-ci-gha-") as github_actions_project:
+            github_actions_path = Path(github_actions_project)
+            github_actions_path.joinpath("package.json").write_text(
+                '{"name":"ci-gha-smoke","private":true,"version":"0.0.0"}\n',
+                encoding="utf-8",
+            )
+            github_actions_path.joinpath("lpm.json").write_text(
+                json.dumps(
+                    {
+                        "envSchema": {
+                            "vars": {
+                                "API_KEY": {"required": True, "secret": True},
+                                "PUBLIC_URL": {"required": True},
+                            }
+                        }
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            github_actions_path.joinpath(".env").write_text(
+                "PUBLIC_URL=https://example.test\nAPI_KEY=supersecret\n",
+                encoding="utf-8",
+            )
+
+            github_actions_result = run_command_result(
+                "install/ci env github-actions",
+                github_actions_path,
+                [str(LPM_BIN), "ci", "env"],
+                extra_env={**common_env, "GITHUB_ACTIONS": "1"},
+            )
+            if github_actions_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/ci env github-actions failed with exit code "
+                    f"{github_actions_result.returncode}"
+                )
+
+            expected_github_actions_stdout = "\n".join(
+                [
+                    "::add-mask::supersecret",
+                    "echo 'API_KEY=supersecret' >> \"$GITHUB_ENV\"",
+                    "echo 'PUBLIC_URL=https://example.test' >> \"$GITHUB_ENV\"",
+                ]
+            )
+            if github_actions_result.stdout.strip() != expected_github_actions_stdout:
+                raise SmokeFailure(
+                    "install/ci env github-actions: expected deterministic GitHub Actions stdout"
+                )
+            require_contains(
+                github_actions_result.stderr,
+                "Emitted 2 environment variables for GitHub Actions",
+                "install/ci env github-actions stderr",
+            )
+            require_not_contains(
+                github_actions_result.stderr,
+                "●",
+                "install/ci env github-actions stderr glyphs",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-ci-generic-") as generic_project:
+            generic_path = Path(generic_project)
+            generic_path.joinpath("package.json").write_text(
+                '{"name":"ci-generic-smoke","private":true,"version":"0.0.0"}\n',
+                encoding="utf-8",
+            )
+            generic_path.joinpath(".env").write_text(
+                "PUBLIC_URL=https://example.test\nAPI_KEY=local-key\n",
+                encoding="utf-8",
+            )
+
+            generic_result = run_command_result(
+                "install/ci env generic shell",
+                generic_path,
+                [str(LPM_BIN), "ci", "env"],
+                extra_env=common_env,
+            )
+            if generic_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/ci env generic shell failed with exit code {generic_result.returncode}"
+                )
+            require_contains(
+                generic_result.stdout,
+                "export API_KEY=local-key",
+                "install/ci env generic shell stdout",
+            )
+            require_contains(
+                generic_result.stdout,
+                "export PUBLIC_URL=https://example.test",
+                "install/ci env generic shell stdout",
+            )
+            require_contains(
+                generic_result.stderr,
+                "Emitted 2 environment variables for generic CI",
+                "install/ci env generic shell stderr",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-ci-output-") as output_project:
+            output_path = Path(output_project)
+            output_path.joinpath("package.json").write_text(
+                '{"name":"ci-output-smoke","private":true,"version":"0.0.0"}\n',
+                encoding="utf-8",
+            )
+            output_path.joinpath(".env").write_text(
+                "SHARED=base\n",
+                encoding="utf-8",
+            )
+            output_path.joinpath(".env.production").write_text(
+                "API_URL=https://prod.example.test\nGREETING=hello world\n",
+                encoding="utf-8",
+            )
+
+            output_result = run_command_result(
+                "install/ci env output file",
+                output_path,
+                [str(LPM_BIN), "ci", "env", "--env=production", "--output=ci.env"],
+                extra_env=common_env,
+            )
+            if output_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/ci env output file failed with exit code {output_result.returncode}"
+                )
+            if output_path.joinpath("ci.env").read_text(encoding="utf-8") != (
+                "API_URL=https://prod.example.test\n"
+                'GREETING="hello world"\n'
+                "SHARED=base"
+            ):
+                raise SmokeFailure(
+                    "install/ci env output file: expected ci.env to contain the merged dotenv payload"
+                )
+            require_contains(
+                output_result.stderr,
+                "wrote 3 vars to ci.env",
+                "install/ci env output file stderr",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-ci-setup-gh-") as github_setup_project:
+            github_setup_path = Path(github_setup_project)
+            github_setup_path.joinpath("package.json").write_text(
+                '{"name":"ci-setup-github-smoke","private":true,"version":"0.0.0"}\n',
+                encoding="utf-8",
+            )
+            github_setup_path.joinpath("lpm.json").write_text(
+                '{ "vault": "vault-123" }\n',
+                encoding="utf-8",
+            )
+
+            github_setup_result = run_command_result(
+                "install/ci setup github-actions",
+                github_setup_path,
+                [str(LPM_BIN), "ci", "setup", "github-actions", "--env=preview"],
+                extra_env=common_env,
+            )
+            if github_setup_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/ci setup github-actions failed with exit code "
+                    f"{github_setup_result.returncode}"
+                )
+            require_contains(
+                github_setup_result.stdout,
+                "GitHub Actions OIDC Setup",
+                "install/ci setup github-actions stdout",
+            )
+            require_contains(
+                github_setup_result.stdout,
+                "lpm env pull --oidc --env=preview --output=.env",
+                "install/ci setup github-actions pull step",
+            )
+            require_contains(
+                github_setup_result.stdout,
+                "LPM_VAULT_ID: vault-123",
+                "install/ci setup github-actions vault id",
+            )
+            require_contains(
+                github_setup_result.stdout,
+                "lpm env oidc allow --provider=github --repo=<owner/repo> --branch=main --env=preview",
+                "install/ci setup github-actions authorization command",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-ci-setup-gl-") as gitlab_setup_project:
+            gitlab_setup_path = Path(gitlab_setup_project)
+            gitlab_setup_path.joinpath("package.json").write_text(
+                '{"name":"ci-setup-gitlab-smoke","private":true,"version":"0.0.0"}\n',
+                encoding="utf-8",
+            )
+
+            gitlab_setup_result = run_command_result(
+                "install/ci setup gitlab",
+                gitlab_setup_path,
+                [str(LPM_BIN), "ci", "setup", "gitlab", "--env=staging"],
+                extra_env=common_env,
+            )
+            if gitlab_setup_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/ci setup gitlab failed with exit code {gitlab_setup_result.returncode}"
+                )
+            require_contains(
+                gitlab_setup_result.stdout,
+                "GitLab CI OIDC Setup",
+                "install/ci setup gitlab stdout",
+            )
+            require_contains(
+                gitlab_setup_result.stdout,
+                "LPM_OIDC_TOKEN",
+                "install/ci setup gitlab token block",
+            )
+            require_contains(
+                gitlab_setup_result.stdout,
+                "aud: https://lpm.dev",
+                "install/ci setup gitlab audience",
+            )
+            require_contains(
+                gitlab_setup_result.stdout,
+                "--env=staging",
+                "install/ci setup gitlab env threading",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-ci-errors-") as errors_project:
+            errors_path = Path(errors_project)
+            errors_path.joinpath("package.json").write_text(
+                '{"name":"ci-errors-smoke","private":true,"version":"0.0.0"}\n',
+                encoding="utf-8",
+            )
+
+            unknown_result = run_command_result(
+                "install/ci setup unknown platform",
+                errors_path,
+                [str(LPM_BIN), "ci", "setup", "bitbucket"],
+                extra_env=common_env,
+            )
+            if unknown_result.returncode == 0:
+                raise SmokeFailure(
+                    "install/ci setup unknown platform: expected a non-zero exit"
+                )
+            require_contains(
+                unknown_result.stderr,
+                "github-actions",
+                "install/ci setup unknown platform stderr",
+            )
+            require_contains(
+                unknown_result.stderr,
+                "gitlab",
+                "install/ci setup unknown platform stderr",
+            )
+
+            unknown_json_result = run_command_result(
+                "install/ci setup unknown platform json",
+                errors_path,
+                [str(LPM_BIN), "--json", "ci", "setup", "bitbucket"],
+                extra_env=common_env,
+            )
+            if unknown_json_result.returncode == 0:
+                raise SmokeFailure(
+                    "install/ci setup unknown platform json: expected a non-zero exit"
+                )
+            unknown_json_envelope = json.loads(unknown_json_result.stdout)
+            if unknown_json_envelope.get("success") is not False:
+                raise SmokeFailure(
+                    "install/ci setup unknown platform json: expected success=false"
+                )
+            error_text = unknown_json_envelope.get("error")
+            if not isinstance(error_text, str):
+                raise SmokeFailure(
+                    "install/ci setup unknown platform json: expected a string error field"
+                )
+            require_contains(
+                error_text,
+                "github-actions",
+                "install/ci setup unknown platform json error",
+            )
+            require_contains(
+                error_text,
+                "gitlab",
+                "install/ci setup unknown platform json error",
+            )
+
+            missing_result = run_command_result(
+                "install/ci setup missing platform",
+                errors_path,
+                [str(LPM_BIN), "ci", "setup"],
+                extra_env=common_env,
+            )
+            if missing_result.returncode == 0:
+                raise SmokeFailure(
+                    "install/ci setup missing platform: expected a non-zero exit"
+                )
+            missing_combined = missing_result.stdout + missing_result.stderr
+            if "usage:" not in missing_combined and "Available" not in missing_combined:
+                raise SmokeFailure(
+                    "install/ci setup missing platform: expected usage guidance"
+                )
+
+
+def scenario_install_init_command() -> None:
+    def blank_project(path: Path) -> None:
+        path.mkdir(parents=True, exist_ok=True)
+
+    whoami_response = {
+        "username": "neo@example.com",
+        "profile_username": "neo",
+        "email": "neo@example.com",
+        "plan_tier": "pro",
+        "mfa_enabled": False,
+        "has_pool_access": True,
+        "usage": {
+            "storage_bytes": 1024 * 1024 * 50,
+            "private_packages": 3,
+        },
+        "limits": {
+            "storageBytes": 1024 * 1024 * 500,
+            "privatePackages": 100,
+        },
+        "organizations": [],
+    }
+
+    with tempfile.TemporaryDirectory(prefix="lpm-init-home-") as home_root:
+        common_env = smoke_home_env(home_root)
+
+        with MockRegistry([], whoami_response=whoami_response) as registry, tempfile.TemporaryDirectory(
+            prefix="lpm-init-human-"
+        ) as human_project, tempfile.TemporaryDirectory(prefix="lpm-init-json-") as json_project:
+            human_path = Path(human_project)
+            json_path = Path(json_project)
+            blank_project(human_path)
+            blank_project(json_path)
+
+            human_result = run_command_result(
+                "install/init human success",
+                human_path,
+                [
+                    str(LPM_BIN),
+                    "--registry",
+                    registry.registry_url.rstrip("/"),
+                    "--insecure",
+                    "init",
+                    "-y",
+                ],
+                extra_env=common_env,
+            )
+            if human_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/init human success failed with exit code {human_result.returncode}"
+                )
+            human_combined = human_result.stdout + human_result.stderr
+            require_contains(
+                human_combined,
+                "Wrote package.json",
+                "install/init human success output",
+            )
+            require_contains(
+                human_combined,
+                "Added lpm.lockb binary to .gitattributes",
+                "install/init human success output",
+            )
+            require_contains(
+                human_combined,
+                "initialized @lpm.dev/neo.package",
+                "install/init human success output",
+            )
+
+            json_result = run_command_result(
+                "install/init json success",
+                json_path,
+                [
+                    str(LPM_BIN),
+                    "--registry",
+                    registry.registry_url.rstrip("/"),
+                    "--insecure",
+                    "init",
+                    "-y",
+                    "--json",
+                ],
+                extra_env=common_env,
+            )
+            if json_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/init json success failed with exit code {json_result.returncode}"
+                )
+            json_envelope = json.loads(json_result.stdout)
+            if json_envelope.get("success") is not True:
+                raise SmokeFailure("install/init json success: expected success=true")
+            if json_envelope.get("name") != "@lpm.dev/neo.package":
+                raise SmokeFailure(
+                    "install/init json success: expected inferred owner name @lpm.dev/neo.package"
+                )
+            if json_envelope.get("version") != "1.0.0":
+                raise SmokeFailure("install/init json success: expected version=1.0.0")
+
+            package_json = read_json_file(json_path / "package.json")
+            if package_json.get("name") != "@lpm.dev/neo.package":
+                raise SmokeFailure(
+                    "install/init package.json: expected inferred owner to be written"
+                )
+            require_exists(json_path / ".gitattributes")
+            require_contains(
+                (json_path / ".gitattributes").read_text(encoding="utf-8"),
+                "lpm.lockb binary",
+                "install/init .gitattributes",
+            )
+
+        with MockRegistry([]) as registry, tempfile.TemporaryDirectory(prefix="lpm-init-fallback-") as fallback_project:
+            fallback_path = Path(fallback_project)
+            blank_project(fallback_path)
+
+            fallback_result = run_command_result(
+                "install/init fallback owner",
+                fallback_path,
+                [
+                    str(LPM_BIN),
+                    "--registry",
+                    registry.registry_url.rstrip("/"),
+                    "--insecure",
+                    "init",
+                    "-y",
+                    "--json",
+                ],
+                extra_env=common_env,
+            )
+            if fallback_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/init fallback owner failed with exit code {fallback_result.returncode}"
+                )
+            fallback_package_json = read_json_file(fallback_path / "package.json")
+            if fallback_package_json.get("name") != "@lpm.dev/username.package":
+                raise SmokeFailure(
+                    "install/init fallback owner: expected literal username fallback when whoami is unavailable"
+                )
+
+
+def scenario_install_whoami_command() -> None:
+    whoami_response = {
+        "username": "test@example.com",
+        "profile_username": "testuser",
+        "email": "test@example.com",
+        "plan_tier": "pro",
+        "mfa_enabled": False,
+        "has_pool_access": True,
+        "usage": {
+            "storage_bytes": 1024 * 1024 * 50,
+            "private_packages": 3,
+        },
+        "limits": {
+            "storageBytes": 1024 * 1024 * 500,
+            "privatePackages": 100,
+        },
+        "organizations": [
+            {
+                "slug": "acme",
+                "name": "Acme",
+                "role": "admin",
+            }
+        ],
+    }
+
+    with tempfile.TemporaryDirectory(prefix="lpm-whoami-logged-out-home-") as logged_out_home, tempfile.TemporaryDirectory(
+        prefix="lpm-whoami-logged-out-project-"
+    ) as logged_out_project, MockRegistry([]) as registry:
+        logged_out_env = smoke_home_env(logged_out_home)
+        logged_out_path = Path(logged_out_project)
+        logged_out_path.joinpath("package.json").write_text(
+            '{"name":"whoami-smoke","version":"1.0.0"}\n',
+            encoding="utf-8",
+        )
+
+        logged_out_result = run_command_result(
+            "install/whoami logged out",
+            logged_out_path,
+            [str(LPM_BIN), "--registry", registry.registry_url.rstrip("/"), "whoami"],
+            extra_env=logged_out_env,
+        )
+        if logged_out_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/whoami logged out failed with exit code {logged_out_result.returncode}"
+            )
+        if logged_out_result.stdout.strip():
+            raise SmokeFailure("install/whoami logged out: expected empty stdout")
+        require_contains(
+            logged_out_result.stderr,
+            f"Not logged in to {registry.registry_url.rstrip('/')}",
+            "install/whoami logged out stderr",
+        )
+        require_contains(
+            logged_out_result.stderr,
+            f"Run `lpm login --registry {registry.registry_url.rstrip('/')}` to authenticate.",
+            "install/whoami logged out login hint",
+        )
+        require_not_contains(
+            logged_out_result.stderr,
+            "●",
+            "install/whoami logged out stderr glyphs",
+        )
+        if registry.requested_paths():
+            raise SmokeFailure(
+                "install/whoami logged out: expected no registry requests when there is no stored session"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-whoami-auth-home-") as auth_home, tempfile.TemporaryDirectory(
+        prefix="lpm-whoami-auth-project-"
+    ) as auth_project, MockRegistry([], whoami_response=whoami_response) as registry:
+        auth_env = smoke_home_env(
+            auth_home,
+            LPM_FORCE_FILE_AUTH="1",
+            LPM_TEST_FAST_SCRYPT="1",
+        )
+        seed_access_session(
+            auth_env,
+            registry.registry_url.rstrip("/"),
+            "access-primary",
+        )
+        auth_path = Path(auth_project)
+        auth_path.joinpath("package.json").write_text(
+            '{"name":"whoami-smoke","version":"1.0.0"}\n',
+            encoding="utf-8",
+        )
+
+        auth_result = run_command_result(
+            "install/whoami authenticated",
+            auth_path,
+            [str(LPM_BIN), "--registry", registry.registry_url.rstrip("/"), "whoami"],
+            extra_env=auth_env,
+        )
+        if auth_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/whoami authenticated failed with exit code {auth_result.returncode}"
+            )
+        if auth_result.stdout.strip():
+            raise SmokeFailure("install/whoami authenticated: expected empty stdout")
+        require_contains(
+            auth_result.stderr,
+            "testuser",
+            "install/whoami authenticated identity header",
+        )
+        require_contains(
+            auth_result.stderr,
+            "email          test@example.com",
+            "install/whoami authenticated email row",
+        )
+        require_contains(
+            auth_result.stderr,
+            "plan           Pro",
+            "install/whoami authenticated plan row",
+        )
+        require_contains(
+            auth_result.stderr,
+            "pool access    yes",
+            "install/whoami authenticated pool row",
+        )
+        require_contains(
+            auth_result.stderr,
+            "mfa            no",
+            "install/whoami authenticated mfa row",
+        )
+        require_contains(
+            auth_result.stderr,
+            "storage        50.00MB / 500MB",
+            "install/whoami authenticated storage usage",
+        )
+        require_contains(
+            auth_result.stderr,
+            "private pkgs   3 / 100",
+            "install/whoami authenticated package usage",
+        )
+        require_contains(
+            auth_result.stderr,
+            "@lpm.dev/testuser.*",
+            "install/whoami authenticated personal scope",
+        )
+        require_contains(
+            auth_result.stderr,
+            "@lpm.dev/acme.*  admin",
+            "install/whoami authenticated org scope",
+        )
+        require_contains(
+            auth_result.stderr,
+            "lpm.dev authenticated",
+            "install/whoami authenticated registries section",
+        )
+        require_contains(
+            auth_result.stderr,
+            "Identity loaded",
+            "install/whoami authenticated completion",
+        )
+        require_not_contains(
+            auth_result.stderr,
+            "◆",
+            "install/whoami authenticated stderr glyphs",
+        )
+        whoami_requests = registry.request_details(
+            method="GET", path="/api/registry/-/whoami"
+        )
+        if len(whoami_requests) != 1:
+            raise SmokeFailure(
+                "install/whoami authenticated: expected exactly one whoami request"
+            )
+        if whoami_requests[0].get("headers", {}).get("authorization") != "Bearer access-primary":
+            raise SmokeFailure(
+                "install/whoami authenticated: expected the stored access token in the Authorization header"
+            )
+
+
+def scenario_install_logout_command() -> None:
+    with tempfile.TemporaryDirectory(prefix="lpm-logout-logged-out-home-") as logged_out_home, tempfile.TemporaryDirectory(
+        prefix="lpm-logout-logged-out-project-"
+    ) as logged_out_project, MockRegistry([]) as registry:
+        logged_out_env = smoke_home_env(logged_out_home)
+        logged_out_path = Path(logged_out_project)
+        logged_out_path.joinpath("package.json").write_text(
+            '{"name":"logout-smoke","version":"1.0.0"}\n',
+            encoding="utf-8",
+        )
+
+        logged_out_result = run_command_result(
+            "install/logout logged out",
+            logged_out_path,
+            [str(LPM_BIN), "--registry", registry.registry_url.rstrip("/"), "logout"],
+            extra_env=logged_out_env,
+        )
+        if logged_out_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/logout logged out failed with exit code {logged_out_result.returncode}"
+            )
+        if logged_out_result.stdout.strip():
+            raise SmokeFailure("install/logout logged out: expected empty stdout")
+        require_contains(
+            logged_out_result.stderr,
+            "No stored lpm.dev session",
+            "install/logout logged out stderr",
+        )
+        require_not_contains(
+            logged_out_result.stderr,
+            "●",
+            "install/logout logged out stderr glyphs",
+        )
+        if registry.requested_paths():
+            raise SmokeFailure(
+                "install/logout logged out: expected no registry requests when there is no stored session"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-logout-auth-home-") as auth_home, tempfile.TemporaryDirectory(
+        prefix="lpm-logout-auth-project-"
+    ) as auth_project, MockRegistry([]) as registry:
+        auth_env = smoke_home_env(
+            auth_home,
+            LPM_FORCE_FILE_AUTH="1",
+            LPM_TEST_FAST_SCRYPT="1",
+        )
+        seed_access_session(
+            auth_env,
+            registry.registry_url.rstrip("/"),
+            "access-primary",
+        )
+        auth_path = Path(auth_project)
+        auth_path.joinpath("package.json").write_text(
+            '{"name":"logout-smoke","version":"1.0.0"}\n',
+            encoding="utf-8",
+        )
+
+        plain_result = run_command_result(
+            "install/logout plain",
+            auth_path,
+            [str(LPM_BIN), "--registry", registry.registry_url.rstrip("/"), "logout"],
+            extra_env=auth_env,
+        )
+        if plain_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/logout plain failed with exit code {plain_result.returncode}"
+            )
+        if plain_result.stdout.strip():
+            raise SmokeFailure("install/logout plain: expected empty stdout")
+        require_contains(
+            plain_result.stderr,
+            "Clearing stored lpm.dev session",
+            "install/logout plain stderr",
+        )
+        require_contains(
+            plain_result.stderr,
+            "Done · signed out of lpm.dev",
+            "install/logout plain stderr",
+        )
+        require_not_contains(
+            plain_result.stderr,
+            "Token revoked on server",
+            "install/logout plain revoke-only message",
+        )
+        if registry.requested_paths():
+            raise SmokeFailure(
+                "install/logout plain: expected no registry requests without --revoke"
+            )
+
+        post_logout_result = run_command_result(
+            "install/logout plain post whoami",
+            auth_path,
+            [str(LPM_BIN), "--registry", registry.registry_url.rstrip("/"), "whoami"],
+            extra_env=auth_env,
+        )
+        if post_logout_result.returncode != 0:
+            raise SmokeFailure(
+                "install/logout plain post whoami: expected success with logged-out guidance"
+            )
+        require_contains(
+            post_logout_result.stderr,
+            "Not logged in to",
+            "install/logout plain post whoami stderr",
+        )
+        if registry.requested_paths():
+            raise SmokeFailure(
+                "install/logout plain post whoami: expected logout to clear local state before the follow-up whoami"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-logout-revoke-home-") as revoke_home, tempfile.TemporaryDirectory(
+        prefix="lpm-logout-revoke-project-"
+    ) as revoke_project, MockRegistry(
+        [], revoke_token_response={"success": True}
+    ) as registry:
+        revoke_env = smoke_home_env(
+            revoke_home,
+            LPM_FORCE_FILE_AUTH="1",
+            LPM_TEST_FAST_SCRYPT="1",
+        )
+        seed_access_session(
+            revoke_env,
+            registry.registry_url.rstrip("/"),
+            "access-primary",
+        )
+        revoke_path = Path(revoke_project)
+        revoke_path.joinpath("package.json").write_text(
+            '{"name":"logout-smoke","version":"1.0.0"}\n',
+            encoding="utf-8",
+        )
+
+        revoke_result = run_command_result(
+            "install/logout revoke",
+            revoke_path,
+            [str(LPM_BIN), "--registry", registry.registry_url.rstrip("/"), "logout", "--revoke"],
+            extra_env=revoke_env,
+        )
+        if revoke_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/logout revoke failed with exit code {revoke_result.returncode}"
+            )
+        if revoke_result.stdout.strip():
+            raise SmokeFailure("install/logout revoke: expected empty stdout")
+        require_contains(
+            revoke_result.stderr,
+            "Clearing stored lpm.dev session",
+            "install/logout revoke stderr",
+        )
+        require_contains(
+            revoke_result.stderr,
+            "Revoked server-side token",
+            "install/logout revoke stderr",
+        )
+        require_contains(
+            revoke_result.stderr,
+            "Done · signed out of lpm.dev",
+            "install/logout revoke stderr",
+        )
+        require_not_contains(
+            revoke_result.stderr,
+            "Token revoked on server",
+            "install/logout revoke redundant revoke detail",
+        )
+
+        revoke_requests = registry.request_details(
+            method="POST", path="/api/registry/tokens/revoke"
+        )
+        if len(revoke_requests) != 1:
+            raise SmokeFailure(
+                "install/logout revoke: expected exactly one token revocation request"
+            )
+        if revoke_requests[0].get("headers", {}).get("authorization") != "Bearer access-primary":
+            raise SmokeFailure(
+                "install/logout revoke: expected the stored access token in the Authorization header"
+            )
+        revoke_body = revoke_requests[0].get("body")
+        if not isinstance(revoke_body, bytes) or b"access-primary" not in revoke_body:
+            raise SmokeFailure(
+                "install/logout revoke: expected the revoke request body to include the access token"
+            )
+
+        post_revoke_result = run_command_result(
+            "install/logout revoke post whoami",
+            revoke_path,
+            [str(LPM_BIN), "--registry", registry.registry_url.rstrip("/"), "whoami"],
+            extra_env=revoke_env,
+        )
+        if post_revoke_result.returncode != 0:
+            raise SmokeFailure(
+                "install/logout revoke post whoami: expected success with logged-out guidance"
+            )
+        require_contains(
+            post_revoke_result.stderr,
+            "Not logged in to",
+            "install/logout revoke post whoami stderr",
+        )
+        if len(registry.request_details()) != 1:
+            raise SmokeFailure(
+                "install/logout revoke post whoami: expected local logout to prevent a follow-up whoami lookup"
+            )
+
+
+def scenario_install_deploy_command() -> None:
+    fixture = reset_workspace_targeting_fixture().resolve()
+
+    with tempfile.TemporaryDirectory(prefix="lpm-deploy-out-") as dry_run_output:
+        dry_run_output_path = Path(dry_run_output)
+        before_entries = list(dry_run_output_path.iterdir())
+
+        dry_run_result = run_command_result(
+            "install/deploy dry run",
+            fixture,
+            [
+                str(LPM_BIN),
+                "deploy",
+                str(dry_run_output_path),
+                "--filter",
+                "@smoke/target-core",
+                "--dry-run",
+            ],
+        )
+        if dry_run_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/deploy dry run failed with exit code {dry_run_result.returncode}"
+            )
+        if dry_run_result.stdout.strip():
+            raise SmokeFailure("install/deploy dry run: expected empty stdout")
+        require_contains(
+            dry_run_result.stderr,
+            "Materializing production closure for @smoke/target-core",
+            "install/deploy dry run stderr",
+        )
+        require_contains(
+            dry_run_result.stderr,
+            "output:",
+            "install/deploy dry run stderr",
+        )
+        require_contains(
+            dry_run_result.stderr,
+            "dry run:",
+            "install/deploy dry run stderr",
+        )
+        require_contains(
+            dry_run_result.stderr,
+            "Done · dry run complete",
+            "install/deploy dry run stderr",
+        )
+        require_not_contains(
+            dry_run_result.stderr,
+            "│",
+            "install/deploy dry run stderr glyphs",
+        )
+        after_entries = list(dry_run_output_path.iterdir())
+        if before_entries != after_entries:
+            raise SmokeFailure(
+                "install/deploy dry run: expected the output directory to remain untouched"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-deploy-json-") as json_output:
+        json_result = run_command_result(
+            "install/deploy dry run json",
+            fixture,
+            [
+                str(LPM_BIN),
+                "--json",
+                "deploy",
+                json_output,
+                "--filter",
+                "@smoke/target-core",
+                "--dry-run",
+            ],
+        )
+        if json_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/deploy dry run json failed with exit code {json_result.returncode}"
+            )
+        json_envelope = json.loads(json_result.stdout)
+        if json_envelope.get("success") is not True:
+            raise SmokeFailure("install/deploy dry run json: expected success=true")
+        if json_envelope.get("dry_run") is not True:
+            raise SmokeFailure("install/deploy dry run json: expected dry_run=true")
+        if json_envelope.get("member") != "@smoke/target-core":
+            raise SmokeFailure(
+                "install/deploy dry run json: expected member=@smoke/target-core"
+            )
+        if not isinstance(json_envelope.get("member_dir"), str):
+            raise SmokeFailure(
+                "install/deploy dry run json: expected member_dir to be present"
+            )
+        if not isinstance(json_envelope.get("output_dir"), str):
+            raise SmokeFailure(
+                "install/deploy dry run json: expected output_dir to be present"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-deploy-multi-") as multi_output:
+        multi_result = run_command_result(
+            "install/deploy multi-match filter",
+            fixture,
+            [
+                str(LPM_BIN),
+                "deploy",
+                multi_output,
+                "--filter",
+                "@smoke/*",
+                "--dry-run",
+            ],
+        )
+        if multi_result.returncode == 0:
+            raise SmokeFailure(
+                "install/deploy multi-match filter: expected a non-zero exit"
+            )
+        multi_combined = multi_result.stdout + multi_result.stderr
+        if (
+            "exactly one" not in multi_combined
+            and "multiple" not in multi_combined
+            and "matched 3" not in multi_combined
+        ):
+            raise SmokeFailure(
+                "install/deploy multi-match filter: expected single-target guidance"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-deploy-zero-") as zero_output:
+        zero_result = run_command_result(
+            "install/deploy zero-match filter",
+            fixture,
+            [
+                str(LPM_BIN),
+                "deploy",
+                zero_output,
+                "--filter",
+                "does-not-exist",
+                "--dry-run",
+            ],
+        )
+        if zero_result.returncode == 0:
+            raise SmokeFailure(
+                "install/deploy zero-match filter: expected a non-zero exit"
+            )
+        zero_combined = zero_result.stdout + zero_result.stderr
+        if (
+            "no" not in zero_combined.lower()
+            and "zero" not in zero_combined.lower()
+            and "matched" not in zero_combined.lower()
+        ):
+            raise SmokeFailure(
+                "install/deploy zero-match filter: expected no-match guidance"
+            )
+
+    inside_workspace = fixture / "deploy-output"
+    inside_workspace.mkdir(exist_ok=True)
+    inside_result = run_command_result(
+        "install/deploy inside workspace",
+        fixture,
+        [
+            str(LPM_BIN),
+            "deploy",
+            str(inside_workspace),
+            "--filter",
+            "@smoke/target-core",
+            "--dry-run",
+        ],
+    )
+    if inside_result.returncode == 0:
+        raise SmokeFailure(
+            "install/deploy inside workspace: expected a non-zero exit"
+        )
+    inside_combined = inside_result.stdout + inside_result.stderr
+    if "workspace" not in inside_combined.lower() and "outside" not in inside_combined.lower():
+        raise SmokeFailure(
+            "install/deploy inside workspace: expected outside-workspace guidance"
+        )
+    delete_path(inside_workspace)
+
+    with tempfile.TemporaryDirectory(prefix="lpm-deploy-nonempty-") as nonempty_output:
+        nonempty_output_path = Path(nonempty_output)
+        existing_file = nonempty_output_path / "existing.txt"
+        existing_file.write_text("hello", encoding="utf-8")
+        nonempty_result = run_command_result(
+            "install/deploy nonempty output",
+            fixture,
+            [
+                str(LPM_BIN),
+                "deploy",
+                nonempty_output,
+                "--filter",
+                "@smoke/target-core",
+                "--dry-run",
+            ],
+        )
+        if nonempty_result.returncode == 0:
+            raise SmokeFailure(
+                "install/deploy nonempty output: expected a non-zero exit"
+            )
+        nonempty_combined = nonempty_result.stdout + nonempty_result.stderr
+        if (
+            "not empty" not in nonempty_combined.lower()
+            and "--force" not in nonempty_combined
+            and "empty" not in nonempty_combined.lower()
+        ):
+            raise SmokeFailure(
+                "install/deploy nonempty output: expected empty-dir guidance"
+            )
+        if existing_file.read_text(encoding="utf-8") != "hello":
+            raise SmokeFailure(
+                "install/deploy nonempty output: expected existing files to remain untouched"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-deploy-single-home-") as single_home, tempfile.TemporaryDirectory(
+        prefix="lpm-deploy-single-project-"
+    ) as single_project, tempfile.TemporaryDirectory(prefix="lpm-deploy-single-out-") as single_output:
+        single_project_path = Path(single_project)
+        single_project_path.joinpath("package.json").write_text(
+            '{"name":"single","version":"1.0.0"}\n',
+            encoding="utf-8",
+        )
+        single_result = run_command_result(
+            "install/deploy outside workspace context",
+            single_project_path,
+            [
+                str(LPM_BIN),
+                "deploy",
+                single_output,
+                "--filter",
+                "single",
+                "--dry-run",
+            ],
+            extra_env=smoke_home_env(single_home),
+        )
+        if single_result.returncode == 0:
+            raise SmokeFailure(
+                "install/deploy outside workspace context: expected a non-zero exit"
+            )
+        single_combined = single_result.stdout + single_result.stderr
+        if "workspace" not in single_combined.lower():
+            raise SmokeFailure(
+                "install/deploy outside workspace context: expected workspace-context guidance"
+            )
+
+
+def scenario_install_publish_command() -> None:
+    def write_publish_package(
+        project_path: Path,
+        name: str,
+        *,
+        version: str = "1.0.0",
+        extra_manifest: dict[str, object] | None = None,
+    ) -> None:
+        manifest = {
+            "name": name,
+            "version": version,
+            "description": "Smoke publish package",
+            "main": "index.js",
+            "license": "MIT",
+        }
+        if extra_manifest:
+            manifest.update(extra_manifest)
+        project_path.mkdir(parents=True, exist_ok=True)
+        project_path.joinpath("package.json").write_text(
+            json.dumps(manifest, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        project_path.joinpath("index.js").write_text(
+            "module.exports = { hello: 'world' }\n",
+            encoding="utf-8",
+        )
+
+    def extract_uploaded_package_json(request_body: bytes) -> dict[str, object]:
+        payload = json.loads(request_body)
+        attachments = payload.get("_attachments")
+        if not isinstance(attachments, dict) or not attachments:
+            raise SmokeFailure(
+                "install/publish uploaded tarball: expected one attachment in the publish payload"
+            )
+        attachment = next(iter(attachments.values()))
+        if not isinstance(attachment, dict) or not isinstance(attachment.get("data"), str):
+            raise SmokeFailure(
+                "install/publish uploaded tarball: expected base64 attachment data"
+            )
+        tarball_data = base64.b64decode(attachment["data"])
+        with tarfile.open(fileobj=io.BytesIO(tarball_data), mode="r:gz") as archive:
+            manifest_member = next(
+                (
+                    member
+                    for member in archive.getmembers()
+                    if member.isfile()
+                    and (member.name == "package/package.json" or member.name.endswith("/package.json"))
+                ),
+                None,
+            )
+            if manifest_member is None:
+                raise SmokeFailure(
+                    "install/publish uploaded tarball: expected package/package.json inside the archive"
+                )
+            extracted = archive.extractfile(manifest_member)
+            if extracted is None:
+                raise SmokeFailure(
+                    "install/publish uploaded tarball: failed to extract package/package.json"
+                )
+            return json.loads(extracted.read().decode("utf-8"))
+
+    with tempfile.TemporaryDirectory(prefix="lpm-publish-home-") as home_root:
+        common_env = smoke_home_env(
+            home_root,
+            LPM_FORCE_FILE_AUTH="1",
+            LPM_TEST_FAST_SCRYPT="1",
+        )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-dry-run-") as dry_run_project:
+            dry_run_path = Path(dry_run_project)
+            write_publish_package(dry_run_path, "@lpm.dev/testuser.test-pkg")
+            dry_run_result = run_command_result(
+                "install/publish dry run",
+                dry_run_path,
+                [str(LPM_BIN), "publish", "--dry-run", "--yes"],
+                extra_env=common_env,
+            )
+            dry_run_combined = dry_run_result.stdout + dry_run_result.stderr
+            if dry_run_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/publish dry run failed with exit code {dry_run_result.returncode}"
+                )
+            if (
+                "test-pkg" not in dry_run_combined
+                and "dry" not in dry_run_combined.lower()
+                and "preview" not in dry_run_combined.lower()
+            ):
+                raise SmokeFailure(
+                    "install/publish dry run: expected package information or a dry-run indicator"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-missing-pkg-") as missing_package_project:
+            missing_package_path = Path(missing_package_project)
+            missing_package_result = run_command_result(
+                "install/publish missing package.json",
+                missing_package_path,
+                [str(LPM_BIN), "publish", "--dry-run", "--yes"],
+                extra_env=common_env,
+            )
+            if missing_package_result.returncode == 0:
+                raise SmokeFailure(
+                    "install/publish missing package.json: expected a non-zero exit"
+                )
+            missing_package_combined = (
+                missing_package_result.stdout + missing_package_result.stderr
+            )
+            if "package.json" not in missing_package_combined and "not found" not in missing_package_combined.lower():
+                raise SmokeFailure(
+                    "install/publish missing package.json: expected a missing package.json error"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-missing-name-") as missing_name_project:
+            missing_name_path = Path(missing_name_project)
+            missing_name_path.joinpath("package.json").write_text(
+                json.dumps(
+                    {
+                        "version": "1.0.0",
+                        "description": "No name field",
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            missing_name_path.joinpath("index.js").write_text(
+                "module.exports = {}\n",
+                encoding="utf-8",
+            )
+            missing_name_result = run_command_result(
+                "install/publish missing name",
+                missing_name_path,
+                [str(LPM_BIN), "publish", "--dry-run", "--yes"],
+                extra_env=common_env,
+            )
+            if missing_name_result.returncode == 0:
+                raise SmokeFailure(
+                    "install/publish missing name: expected a non-zero exit"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-target-flags-") as target_flags_project:
+            target_flags_path = Path(target_flags_project)
+            write_publish_package(target_flags_path, "@lpm.dev/testuser.multi-target")
+            target_flags_result = run_command_result(
+                "install/publish multi target flags",
+                target_flags_path,
+                [str(LPM_BIN), "publish", "--dry-run", "--yes", "--lpm", "--npm"],
+                extra_env=common_env,
+            )
+            target_flags_combined = target_flags_result.stdout + target_flags_result.stderr
+            if "unexpected argument" in target_flags_combined or "unrecognized" in target_flags_combined:
+                raise SmokeFailure(
+                    "install/publish multi target flags: expected --lpm and --npm to be recognized"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-check-") as check_project:
+            check_path = Path(check_project)
+            write_publish_package(
+                check_path,
+                "@lpm.dev/testuser.quality-test",
+                extra_manifest={
+                    "repository": {
+                        "type": "git",
+                        "url": "https://github.com/test/test",
+                    }
+                },
+            )
+            check_path.joinpath("README.md").write_text(
+                "# Quality Test\n\nA test package.\n",
+                encoding="utf-8",
+            )
+            check_result = run_command_result(
+                "install/publish check mode",
+                check_path,
+                [str(LPM_BIN), "publish", "--check"],
+                extra_env=common_env,
+            )
+            if check_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/publish check mode failed with exit code {check_result.returncode}"
+                )
+            check_combined = check_result.stdout + check_result.stderr
+            if (
+                "quality" not in check_combined.lower()
+                and "score" not in check_combined.lower()
+            ):
+                raise SmokeFailure(
+                    "install/publish check mode: expected a quality report"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-custom-registry-") as custom_registry_project:
+            custom_registry_path = Path(custom_registry_project)
+            write_publish_package(
+                custom_registry_path,
+                "custom-publish-pkg",
+                version="1.2.3",
+            )
+            registry_url = "https://packages.example.test/npm"
+            custom_registry_result = run_command_result(
+                "install/publish custom registry dry run json",
+                custom_registry_path,
+                [
+                    str(LPM_BIN),
+                    "publish",
+                    "--publish-registry",
+                    registry_url,
+                    "--dry-run",
+                    "--yes",
+                    "--json",
+                ],
+                extra_env=common_env,
+            )
+            if custom_registry_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/publish custom registry dry run json failed with exit code "
+                    f"{custom_registry_result.returncode}"
+                )
+            custom_registry_envelope = json.loads(custom_registry_result.stdout)
+            if custom_registry_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/publish custom registry dry run json: expected success=true"
+                )
+            if custom_registry_envelope.get("dry_run") is not True:
+                raise SmokeFailure(
+                    "install/publish custom registry dry run json: expected dry_run=true"
+                )
+            if custom_registry_envelope.get("name") != "custom-publish-pkg":
+                raise SmokeFailure(
+                    "install/publish custom registry dry run json: expected resolved name"
+                )
+            targets = custom_registry_envelope.get("targets")
+            if not isinstance(targets, list) or len(targets) != 1:
+                raise SmokeFailure(
+                    "install/publish custom registry dry run json: expected exactly one resolved target"
+                )
+            if targets[0].get("registry") != registry_url:
+                raise SmokeFailure(
+                    "install/publish custom registry dry run json: expected the target registry URL"
+                )
+
+        provider_cases = [
+            (
+                "github",
+                "@my-org/gh-pkg",
+                None,
+            ),
+            (
+                "gitlab",
+                "@my-org/gl-pkg",
+                {"publish": {"gitlab": {"projectId": "12345"}}},
+            ),
+            (
+                "npm",
+                "@my-org/npm-pkg",
+                None,
+            ),
+        ]
+        for provider, package_name, lpm_config in provider_cases:
+            with tempfile.TemporaryDirectory(prefix=f"lpm-publish-{provider}-") as provider_project:
+                provider_path = Path(provider_project)
+                write_publish_package(provider_path, package_name)
+                if lpm_config is not None:
+                    provider_path.joinpath("lpm.json").write_text(
+                        json.dumps(lpm_config, indent=2) + "\n",
+                        encoding="utf-8",
+                    )
+                provider_result = run_command_result(
+                    f"install/publish {provider} dry run json",
+                    provider_path,
+                    [
+                        str(LPM_BIN),
+                        "--json",
+                        "publish",
+                        "--dry-run",
+                        "--yes",
+                        f"--{provider}",
+                    ],
+                    extra_env=common_env,
+                )
+                if provider_result.returncode != 0:
+                    raise SmokeFailure(
+                        f"install/publish {provider} dry run json failed with exit code {provider_result.returncode}"
+                    )
+                provider_envelope = json.loads(provider_result.stdout)
+                targets = provider_envelope.get("targets")
+                if not isinstance(targets, list) or not any(
+                    isinstance(target, dict) and target.get("registry") == provider
+                    for target in targets
+                ):
+                    raise SmokeFailure(
+                        f"install/publish {provider} dry run json: expected a target with registry={provider}"
+                    )
+
+        whoami_response = {
+            "username": "test@example.com",
+            "profile_username": "testuser",
+            "email": "test@example.com",
+            "plan_tier": "pro",
+            "mfa_enabled": False,
+            "has_pool_access": True,
+            "usage": {
+                "storage_bytes": 1024 * 1024 * 50,
+                "private_packages": 3,
+            },
+            "limits": {
+                "storageBytes": 1024 * 1024 * 500,
+                "privatePackages": 100,
+            },
+            "organizations": [],
+        }
+
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-mock-") as mock_project, MockRegistry(
+            [],
+            whoami_response=whoami_response,
+            accept_publish_put=True,
+        ) as registry:
+            mock_project_path = Path(mock_project)
+            write_publish_package(mock_project_path, "@lpm.dev/testuser.mock-publish")
+            mock_project_path.joinpath("README.md").write_text(
+                "# Mock Publish Test\n\nA package.\n",
+                encoding="utf-8",
+            )
+            mock_result = run_command_result(
+                "install/publish mock registry success",
+                mock_project_path,
+                [
+                    str(LPM_BIN),
+                    "--registry",
+                    registry.registry_url.rstrip("/"),
+                    "--insecure",
+                    "publish",
+                    "--yes",
+                    "--token",
+                    "test-token-123",
+                    "--lpm",
+                ],
+                extra_env=common_env,
+            )
+            if mock_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/publish mock registry success failed with exit code "
+                    f"{mock_result.returncode}"
+                )
+            mock_combined = mock_result.stdout + mock_result.stderr
+            require_contains(
+                mock_combined,
+                "Done · published @lpm.dev/testuser.mock-publish@1.0.0",
+                "install/publish mock registry success output",
+            )
+            require_contains(
+                mock_combined,
+                "Secret scan passed",
+                "install/publish mock registry success output",
+            )
+            require_contains(
+                mock_combined,
+                "Quality score:",
+                "install/publish mock registry success output",
+            )
+            require_contains(
+                mock_combined,
+                "Uploading tarball to lpm.dev",
+                "install/publish mock registry success output",
+            )
+            require_contains(
+                mock_combined,
+                "target     @lpm.dev/testuser.mock-publish@1.0.0",
+                "install/publish mock registry success output",
+            )
+            require_not_contains(
+                mock_combined,
+                "Packing tarball",
+                "install/publish mock registry success chatter",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-catalog-") as catalog_workspace, MockRegistry(
+            [],
+            whoami_response=whoami_response,
+            accept_publish_put=True,
+        ) as registry:
+            catalog_workspace_path = Path(catalog_workspace)
+            catalog_workspace_path.joinpath("package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "catalog-publish-workspace",
+                        "version": "1.0.0",
+                        "private": True,
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            catalog_workspace_path.joinpath("pnpm-workspace.yaml").write_text(
+                'packages:\n  - "packages/*"\ncatalog:\n  ms: ^2.1.3\n',
+                encoding="utf-8",
+            )
+            lib_path = catalog_workspace_path / "packages" / "lib"
+            lib_path.mkdir(parents=True, exist_ok=True)
+            lib_path.joinpath("package.json").write_text(
+                json.dumps(
+                    {
+                        "name": "@lpm.dev/testuser.catalog-publish",
+                        "version": "1.0.0",
+                        "description": "Catalog publish rewrite test",
+                        "main": "index.js",
+                        "license": "MIT",
+                        "dependencies": {"ms": "catalog:"},
+                    },
+                    indent=2,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            lib_path.joinpath("index.js").write_text(
+                'module.exports = require("ms")\n',
+                encoding="utf-8",
+            )
+
+            catalog_result = run_command_result(
+                "install/publish catalog rewrite",
+                lib_path,
+                [
+                    str(LPM_BIN),
+                    "--registry",
+                    registry.registry_url.rstrip("/"),
+                    "--insecure",
+                    "publish",
+                    "--yes",
+                    "--token",
+                    "test-token-123",
+                    "--lpm",
+                ],
+                extra_env=common_env,
+            )
+            if catalog_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/publish catalog rewrite failed with exit code {catalog_result.returncode}"
+                )
+            publish_requests = registry.request_details(method="PUT")
+            if len(publish_requests) != 1:
+                raise SmokeFailure(
+                    "install/publish catalog rewrite: expected exactly one publish PUT request"
+                )
+            manifest = extract_uploaded_package_json(publish_requests[0]["body"])
+            dependencies = manifest.get("dependencies")
+            if not isinstance(dependencies, dict) or dependencies.get("ms") != "^2.1.3":
+                raise SmokeFailure(
+                    "install/publish catalog rewrite: expected catalog: to resolve to ^2.1.3 in the uploaded tarball"
+                )
+            if "catalog:" in json.dumps(manifest, sort_keys=True):
+                raise SmokeFailure(
+                    "install/publish catalog rewrite: expected the uploaded manifest to omit catalog: references"
+                )
+
+
+def scenario_install_node_runtime_command() -> None:
+    def current_node_suffix() -> str:
+        if sys.platform == "darwin":
+            os_name = "darwin"
+        elif sys.platform.startswith("linux"):
+            os_name = "linux"
+        elif sys.platform.startswith("win"):
+            os_name = "win"
+        else:
+            raise SmokeFailure(
+                f"install/node-runtime: unsupported smoke platform {sys.platform}"
+            )
+
+        if sys.platform.startswith("win"):
+            machine = os.environ.get("PROCESSOR_ARCHITECTURE", "").lower()
+        else:
+            machine = os.uname().machine.lower()
+        if machine in {"arm64", "aarch64"}:
+            arch = "arm64"
+        elif machine in {"x86_64", "amd64"}:
+            arch = "x64"
+        else:
+            raise SmokeFailure(
+                f"install/node-runtime: unsupported smoke architecture {machine}"
+            )
+        return f"{os_name}-{arch}"
+
+    def current_node_archive_name(version: str) -> str:
+        extension = "zip" if sys.platform.startswith("win") else "tar.gz"
+        return f"node-v{version}-{current_node_suffix()}.{extension}"
+
+    def make_node_runtime_archive(version: str) -> bytes:
+        root_dir = f"node-v{version}-{current_node_suffix()}"
+        node_binary_name = "node.exe" if sys.platform.startswith("win") else "node"
+        node_contents = (
+            b"mock-node.exe\n"
+            if sys.platform.startswith("win")
+            else b"#!/bin/sh\necho mock-node\n"
+        )
+
+        if sys.platform.startswith("win"):
+            archive_buffer = io.BytesIO()
+            with zipfile.ZipFile(archive_buffer, mode="w") as archive:
+                directory_entry = zipfile.ZipInfo(f"{root_dir}/")
+                directory_entry.external_attr = 0o755 << 16
+                archive.writestr(directory_entry, b"")
+
+                bin_entry = zipfile.ZipInfo(f"{root_dir}/bin/")
+                bin_entry.external_attr = 0o755 << 16
+                archive.writestr(bin_entry, b"")
+
+                node_entry = zipfile.ZipInfo(f"{root_dir}/bin/{node_binary_name}")
+                node_entry.external_attr = 0o755 << 16
+                archive.writestr(node_entry, node_contents)
+            return archive_buffer.getvalue()
+
+        archive_buffer = io.BytesIO()
+        with tarfile.open(fileobj=archive_buffer, mode="w:gz") as archive:
+            root_info = tarfile.TarInfo(f"{root_dir}/")
+            root_info.type = tarfile.DIRTYPE
+            root_info.mode = 0o755
+            archive.addfile(root_info)
+
+            bin_info = tarfile.TarInfo(f"{root_dir}/bin/")
+            bin_info.type = tarfile.DIRTYPE
+            bin_info.mode = 0o755
+            archive.addfile(bin_info)
+
+            node_info = tarfile.TarInfo(f"{root_dir}/bin/{node_binary_name}")
+            node_info.mode = 0o755
+            node_info.size = len(node_contents)
+            archive.addfile(node_info, io.BytesIO(node_contents))
+
+        return archive_buffer.getvalue()
+
+    def node_env(home_root: str) -> dict[str, str]:
+        return smoke_home_env(home_root)
+
+    def managed_node_dir(lpm_home: str, version: str) -> Path:
+        return Path(lpm_home) / "runtimes" / "node" / version
+
+    def seed_installed_node(lpm_home: str, version: str) -> None:
+        binary_name = "node.exe" if sys.platform.startswith("win") else "node"
+        bin_dir = managed_node_dir(lpm_home, version) / "bin"
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        bin_dir.joinpath(binary_name).write_text("\n", encoding="utf-8")
+
+    def write_node_index_cache(lpm_home: str, releases: list[dict[str, object]]) -> None:
+        runtimes_dir = Path(lpm_home) / "runtimes"
+        runtimes_dir.mkdir(parents=True, exist_ok=True)
+        runtimes_dir.joinpath("index-cache.json").write_text(
+            json.dumps(releases),
+            encoding="utf-8",
+        )
+
+    def write_basic_project(project_path: Path, name: str) -> None:
+        project_path.mkdir(parents=True, exist_ok=True)
+        project_path.joinpath("package.json").write_text(
+            json.dumps({"name": name, "version": "1.0.0"}) + "\n",
+            encoding="utf-8",
+        )
+
+    version = "22.12.0"
+    archive_name = current_node_archive_name(version)
+    archive_bytes = make_node_runtime_archive(version)
+    archive_sha = hashlib.sha256(archive_bytes).hexdigest()
+    archive_routes = {
+        f"/node-dist/v{version}/{archive_name}": (
+            "application/octet-stream",
+            archive_bytes,
+        ),
+        f"/node-dist/v{version}/SHASUMS256.txt": (
+            "text/plain",
+            f"{archive_sha}  {archive_name}\n".encode("utf-8"),
+        ),
+    }
+
+    with MockRegistry([], extra_routes=archive_routes) as server:
+        base_url = f"{server.registry_url.rstrip('/')}/node-dist"
+        if server._server is None:
+            raise SmokeFailure("install/node-runtime: mock node-dist server did not start")
+        server._server.routes["/node-dist/index.json"] = (
+            "application/json",
+            json.dumps(
+                [
+                    {
+                        "version": "v23.1.0",
+                        "date": "2026-05-01",
+                        "lts": False,
+                        "dist_base_url": base_url,
+                    },
+                    {
+                        "version": f"v{version}",
+                        "date": "2026-04-15",
+                        "lts": "Jod",
+                        "dist_base_url": base_url,
+                    },
+                ]
+            ).encode("utf-8"),
+        )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-node-use-empty-home-") as empty_home, tempfile.TemporaryDirectory(
+            prefix="lpm-node-use-empty-project-"
+        ) as empty_project:
+            empty_env = node_env(empty_home)
+            empty_path = Path(empty_project)
+            write_basic_project(empty_path, "use-list")
+
+            empty_list_result = run_command_result(
+                "install/node-runtime use list empty",
+                empty_path,
+                [str(LPM_BIN), "use", "--list"],
+                extra_env=empty_env,
+            )
+            if empty_list_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/node-runtime use list empty failed with exit code {empty_list_result.returncode}"
+                )
+            if empty_list_result.stdout.strip():
+                raise SmokeFailure(
+                    "install/node-runtime use list empty: expected empty stdout"
+                )
+            require_contains(
+                empty_list_result.stderr,
+                "No Node versions installed",
+                "install/node-runtime use list empty stderr",
+            )
+            require_contains(
+                empty_list_result.stderr,
+                "Run lpm use node@22 to install one",
+                "install/node-runtime use list empty hint",
+            )
+
+            bare_use_result = run_command_result(
+                "install/node-runtime bare use",
+                empty_path,
+                [str(LPM_BIN), "use"],
+                extra_env=empty_env,
+            )
+            if bare_use_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/node-runtime bare use failed with exit code {bare_use_result.returncode}"
+                )
+            require_contains(
+                bare_use_result.stderr,
+                "No Node versions installed",
+                "install/node-runtime bare use stderr",
+            )
+
+            empty_list_json = run_command_result(
+                "install/node-runtime use list empty json",
+                empty_path,
+                [str(LPM_BIN), "--json", "use", "--list"],
+                extra_env=empty_env,
+            )
+            if empty_list_json.returncode != 0:
+                raise SmokeFailure(
+                    f"install/node-runtime use list empty json failed with exit code {empty_list_json.returncode}"
+                )
+            empty_list_envelope = json.loads(empty_list_json.stdout)
+            if empty_list_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/node-runtime use list empty json: expected success=true"
+                )
+            if empty_list_envelope.get("runtime") != "node":
+                raise SmokeFailure(
+                    "install/node-runtime use list empty json: expected runtime=node"
+                )
+            if empty_list_envelope.get("versions") != []:
+                raise SmokeFailure(
+                    "install/node-runtime use list empty json: expected zero installed versions"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-node-use-seeded-home-") as seeded_home, tempfile.TemporaryDirectory(
+            prefix="lpm-node-use-seeded-project-"
+        ) as seeded_project:
+            seeded_env = node_env(seeded_home)
+            seeded_path = Path(seeded_project)
+            write_basic_project(seeded_path, "use-list")
+            seed_installed_node(seeded_env["LPM_HOME"], "22.12.0")
+            seed_installed_node(seeded_env["LPM_HOME"], "20.18.0")
+
+            seeded_list_result = run_command_result(
+                "install/node-runtime use list seeded",
+                seeded_path,
+                [str(LPM_BIN), "use", "--list"],
+                extra_env=seeded_env,
+            )
+            if seeded_list_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/node-runtime use list seeded failed with exit code {seeded_list_result.returncode}"
+                )
+            require_contains(
+                seeded_list_result.stderr,
+                "Installed Node versions (2)",
+                "install/node-runtime use list seeded stderr",
+            )
+            require_contains(
+                seeded_list_result.stderr,
+                "22.12.0",
+                "install/node-runtime use list seeded versions",
+            )
+            require_contains(
+                seeded_list_result.stderr,
+                "20.18.0",
+                "install/node-runtime use list seeded versions",
+            )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-node-use-errors-home-") as errors_home, tempfile.TemporaryDirectory(
+            prefix="lpm-node-use-errors-project-"
+        ) as errors_project:
+            errors_env = node_env(errors_home)
+            errors_path = Path(errors_project)
+            write_basic_project(errors_path, "use-errors")
+
+            unsupported_result = run_command_result(
+                "install/node-runtime unsupported runtime",
+                errors_path,
+                [str(LPM_BIN), "use", "deno@1.0.0"],
+                extra_env=errors_env,
+            )
+            if unsupported_result.returncode == 0:
+                raise SmokeFailure(
+                    "install/node-runtime unsupported runtime: expected a non-zero exit"
+                )
+            require_contains(
+                unsupported_result.stderr,
+                "deno",
+                "install/node-runtime unsupported runtime stderr",
+            )
+            require_contains(
+                unsupported_result.stderr,
+                "node",
+                "install/node-runtime unsupported runtime guidance",
+            )
+            require_contains(
+                unsupported_result.stderr,
+                "bun",
+                "install/node-runtime unsupported runtime guidance",
+            )
+
+            pin_no_spec_result = run_command_result(
+                "install/node-runtime pin without spec json",
+                errors_path,
+                [str(LPM_BIN), "--json", "use", "--pin"],
+                extra_env=errors_env,
+            )
+            pin_no_spec_envelope = json.loads(pin_no_spec_result.stdout)
+            if pin_no_spec_envelope.get("success") is not False:
+                raise SmokeFailure(
+                    "install/node-runtime pin without spec json: expected success=false"
+                )
+            error_message = pin_no_spec_envelope.get("error")
+            if not isinstance(error_message, str) or (
+                "missing version" not in error_message and "Usage" not in error_message
+            ):
+                raise SmokeFailure(
+                    "install/node-runtime pin without spec json: expected missing-version guidance"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-node-use-pin-home-") as pin_home, tempfile.TemporaryDirectory(
+            prefix="lpm-node-use-pin-project-"
+        ) as pin_project:
+            pin_env = node_env(pin_home)
+            pin_path = Path(pin_project)
+            write_basic_project(pin_path, "use-pin")
+            seed_installed_node(pin_env["LPM_HOME"], "22.12.0")
+
+            pin_result = run_command_result(
+                "install/node-runtime pin major",
+                pin_path,
+                [str(LPM_BIN), "use", "node@22", "--pin"],
+                extra_env=pin_env,
+            )
+            if pin_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/node-runtime pin major failed with exit code {pin_result.returncode}"
+                )
+            require_contains(
+                pin_result.stderr,
+                "Pinned node@22.12.0 in lpm.json",
+                "install/node-runtime pin major stderr",
+            )
+            pinned_manifest = read_json_file(pin_path / "lpm.json")
+            pinned_runtime = pinned_manifest.get("runtime")
+            if not isinstance(pinned_runtime, dict) or pinned_runtime.get("node") != "22.12.0":
+                raise SmokeFailure(
+                    "install/node-runtime pin major: expected lpm.json runtime.node=22.12.0"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-node-use-unmatched-home-") as unmatched_home, tempfile.TemporaryDirectory(
+            prefix="lpm-node-use-unmatched-project-"
+        ) as unmatched_project:
+            unmatched_env = node_env(unmatched_home)
+            unmatched_path = Path(unmatched_project)
+            write_basic_project(unmatched_path, "use-pin-node-spec")
+
+            unmatched_result = run_command_result(
+                "install/node-runtime pin unmatched spec",
+                unmatched_path,
+                [str(LPM_BIN), "use", "node@lts", "--pin"],
+                extra_env=unmatched_env,
+            )
+            if unmatched_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/node-runtime pin unmatched spec failed with exit code {unmatched_result.returncode}"
+                )
+            require_contains(
+                unmatched_result.stderr,
+                "node@lts is not currently installed",
+                "install/node-runtime pin unmatched spec stderr",
+            )
+            require_contains(
+                unmatched_result.stderr,
+                "Run `lpm use node@lts` to install it",
+                "install/node-runtime pin unmatched spec guidance",
+            )
+            unmatched_manifest = read_json_file(unmatched_path / "lpm.json")
+            unmatched_runtime = unmatched_manifest.get("runtime")
+            if not isinstance(unmatched_runtime, dict) or unmatched_runtime.get("node") != "lts":
+                raise SmokeFailure(
+                    "install/node-runtime pin unmatched spec: expected lpm.json runtime.node=lts"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-node-use-install-home-") as install_home, tempfile.TemporaryDirectory(
+            prefix="lpm-node-use-install-project-"
+        ) as install_project:
+            install_env = node_env(install_home)
+            install_path = Path(install_project)
+            write_basic_project(install_path, "use-install-node")
+            write_node_index_cache(
+                install_env["LPM_HOME"],
+                [
+                    {
+                        "version": "v23.1.0",
+                        "date": "2026-05-01",
+                        "lts": False,
+                        "dist_base_url": base_url,
+                    },
+                    {
+                        "version": f"v{version}",
+                        "date": "2026-04-15",
+                        "lts": "Jod",
+                        "dist_base_url": base_url,
+                    },
+                ],
+            )
+
+            install_result = run_command_result(
+                "install/node-runtime install node lts",
+                install_path,
+                [str(LPM_BIN), "use", "node@lts"],
+                extra_env=install_env,
+            )
+            if install_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/node-runtime install node lts failed with exit code {install_result.returncode}"
+                )
+            require_contains(
+                install_result.stderr,
+                "Resolving node@lts",
+                "install/node-runtime install node lts stderr",
+            )
+            require_contains(
+                install_result.stderr,
+                "→ 22.12.0",
+                "install/node-runtime install node lts resolution",
+            )
+            require_contains(
+                install_result.stderr,
+                "(lts/jod)",
+                "install/node-runtime install node lts resolution",
+            )
+            require_contains(
+                install_result.stderr,
+                "Pinned node@22.12.0 in lpm.json",
+                "install/node-runtime install node lts pin",
+            )
+            require_contains(
+                install_result.stderr,
+                "Downloaded Node 22.12.0 ·",
+                "install/node-runtime install node lts download",
+            )
+            require_contains(
+                install_result.stderr,
+                "Verified SHA-256 sha256:",
+                "install/node-runtime install node lts checksum",
+            )
+            require_contains(
+                install_result.stderr,
+                "Now using Node 22.12.0 ·",
+                "install/node-runtime install node lts completion",
+            )
+            if not managed_node_dir(install_env["LPM_HOME"], version).exists():
+                raise SmokeFailure(
+                    "install/node-runtime install node lts: expected the managed Node runtime to be installed"
+                )
+            install_manifest = read_json_file(install_path / "lpm.json")
+            install_runtime = install_manifest.get("runtime")
+            if not isinstance(install_runtime, dict) or install_runtime.get("node") != version:
+                raise SmokeFailure(
+                    "install/node-runtime install node lts: expected lpm.json to pin the resolved exact version"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-node-use-json-home-") as json_home, tempfile.TemporaryDirectory(
+            prefix="lpm-node-use-json-project-"
+        ) as json_project:
+            json_env = node_env(json_home)
+            json_path = Path(json_project)
+            write_basic_project(json_path, "use-install-node-json")
+            write_node_index_cache(
+                json_env["LPM_HOME"],
+                [
+                    {
+                        "version": f"v{version}",
+                        "date": "2026-04-15",
+                        "lts": "Jod",
+                        "dist_base_url": base_url,
+                    }
+                ],
+            )
+            json_result = run_command_result(
+                "install/node-runtime install node json",
+                json_path,
+                [str(LPM_BIN), "--json", "use", f"node@{version}"],
+                extra_env=json_env,
+            )
+            if json_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/node-runtime install node json failed with exit code {json_result.returncode}"
+                )
+            envelopes = [
+                json.loads(line)
+                for line in json_result.stdout.splitlines()
+                if line.strip()
+            ]
+            if len(envelopes) != 2:
+                raise SmokeFailure(
+                    "install/node-runtime install node json: expected install and pin envelopes"
+                )
+            if envelopes[0].get("success") is not True or envelopes[0].get("status") != "installed":
+                raise SmokeFailure(
+                    "install/node-runtime install node json: expected the first envelope to describe the installation"
+                )
+            if envelopes[0].get("runtime") != "node" or envelopes[0].get("version") != version:
+                raise SmokeFailure(
+                    "install/node-runtime install node json: expected runtime=node and version=22.12.0"
+                )
+            pinned_payload = envelopes[1].get("pinned")
+            if envelopes[1].get("success") is not True or not isinstance(pinned_payload, dict) or pinned_payload.get("node") != version:
+                raise SmokeFailure(
+                    "install/node-runtime install node json: expected the second envelope to pin node@22.12.0"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-node-use-remove-home-") as remove_home, tempfile.TemporaryDirectory(
+            prefix="lpm-node-use-remove-project-"
+        ) as remove_project:
+            remove_env = node_env(remove_home)
+            remove_path = Path(remove_project)
+            write_basic_project(remove_path, "use-remove")
+            seed_installed_node(remove_env["LPM_HOME"], "22.12.0")
+            seed_installed_node(remove_env["LPM_HOME"], "20.18.0")
+            seed_installed_node(remove_env["LPM_HOME"], "20.17.0")
+
+            remove_result = run_command_result(
+                "install/node-runtime remove major spec",
+                remove_path,
+                [str(LPM_BIN), "use", "remove", "node@20"],
+                extra_env=remove_env,
+            )
+            if remove_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/node-runtime remove major spec failed with exit code {remove_result.returncode}"
+                )
+            if remove_result.stdout.strip():
+                raise SmokeFailure(
+                    "install/node-runtime remove major spec: expected empty stdout"
+                )
+            require_contains(
+                remove_result.stderr,
+                "Removed 2 Node versions",
+                "install/node-runtime remove major spec stderr",
+            )
+            require_contains(
+                remove_result.stderr,
+                "20.18.0",
+                "install/node-runtime remove major spec removed list",
+            )
+            require_contains(
+                remove_result.stderr,
+                "20.17.0",
+                "install/node-runtime remove major spec removed list",
+            )
+            if managed_node_dir(remove_env["LPM_HOME"], "20.18.0").exists() or managed_node_dir(
+                remove_env["LPM_HOME"], "20.17.0"
+            ).exists():
+                raise SmokeFailure(
+                    "install/node-runtime remove major spec: expected matching managed Node versions to be removed"
+                )
+            if not managed_node_dir(remove_env["LPM_HOME"], "22.12.0").exists():
+                raise SmokeFailure(
+                    "install/node-runtime remove major spec: expected non-matching managed Node versions to remain installed"
+                )
+
+
 def scenario_install_auth_commands() -> None:
     def credentials_path(home: str) -> Path:
-        return Path(home) / ".lpm" / ".credentials"
+        return Path(smoke_home_path(home)) / ".credentials"
 
     def write_publish_package(project_path: Path, package_name: str) -> None:
         project_path.joinpath("package.json").write_text(
@@ -11834,11 +17370,11 @@ def scenario_install_auth_commands() -> None:
                 "install/auth github host-cli login json",
                 Path(gh_project),
                 [str(LPM_BIN), "--json", "login", "--github"],
-                extra_env={
+                extra_env=smoke_home_env(
+                    gh_home,
+                    PATH=os.pathsep.join([str(fake_bin), os.environ.get("PATH", "")]),
                     **common_auth_env,
-                    "LPM_HOME": gh_home,
-                    "PATH": os.pathsep.join([str(fake_bin), os.environ.get("PATH", "")]),
-                },
+                ),
             )
             if gh_result.returncode != 0:
                 raise SmokeFailure(
@@ -11869,11 +17405,11 @@ def scenario_install_auth_commands() -> None:
                 "install/auth npm env login json",
                 Path(npm_project),
                 [str(LPM_BIN), "--json", "login", "--npm"],
-                extra_env={
+                extra_env=smoke_home_env(
+                    npm_home,
+                    NPM_TOKEN="npm-env-token",
                     **common_auth_env,
-                    "LPM_HOME": npm_home,
-                    "NPM_TOKEN": "npm-env-token",
-                },
+                ),
             )
             if npm_result.returncode != 0:
                 raise SmokeFailure(
@@ -11911,10 +17447,10 @@ def scenario_install_auth_commands() -> None:
                     "--token",
                     "gitlab-fallback-token",
                 ],
-                extra_env={
+                extra_env=smoke_home_env(
+                    gitlab_home,
                     **common_auth_env,
-                    "LPM_HOME": gitlab_home,
-                },
+                ),
             )
             if gitlab_result.returncode != 0:
                 raise SmokeFailure(
@@ -11948,9 +17484,8 @@ def scenario_install_auth_commands() -> None:
             )
 
             hermetic_publish_env = {
+                **smoke_home_env(publish_home, PATH=str(empty_bin)),
                 **common_auth_env,
-                "LPM_HOME": publish_home,
-                "PATH": str(empty_bin),
             }
 
             npm_publish_output = run_command_expect_failure(
@@ -12067,16 +17602,17 @@ def scenario_install_bun_runtime() -> None:
             log_path=log_path,
         )
 
-    with tempfile.TemporaryDirectory(prefix="lpm-bun-use-home-") as lpm_home, tempfile.TemporaryDirectory(
+    with tempfile.TemporaryDirectory(prefix="lpm-bun-use-home-") as home_root, tempfile.TemporaryDirectory(
         prefix="lpm-bun-use-project-"
     ) as project_dir:
+        lpm_home = smoke_home_path(home_root)
         project_path = Path(project_dir)
         write_package(project_path, package_name="bun-use-smoke")
         seed_managed_runtime_executable(lpm_home, "bun", "1.3.14", "bun", "managed-bun-1.3.14")
         seed_managed_runtime_executable(lpm_home, "bun", "1.3.9", "bun", "managed-bun-1.3.9")
         seed_managed_runtime_executable(lpm_home, "bun", "1.2.23", "bun", "managed-bun-1.2.23")
 
-        use_env = {"LPM_HOME": lpm_home, "PATH": minimal_shell_path}
+        use_env = smoke_home_env(home_root, PATH=minimal_shell_path)
 
         list_result = run_command_result(
             "install/bun-runtime use list bun json",
@@ -12164,9 +17700,10 @@ def scenario_install_bun_runtime() -> None:
                 "install/bun-runtime use remove bun major-minor: expected 1.2.23 managed Bun to remain installed"
             )
 
-    with tempfile.TemporaryDirectory(prefix="lpm-bun-engines-home-") as lpm_home, tempfile.TemporaryDirectory(
+    with tempfile.TemporaryDirectory(prefix="lpm-bun-engines-home-") as home_root, tempfile.TemporaryDirectory(
         prefix="lpm-bun-engines-project-"
     ) as project_dir, tempfile.TemporaryDirectory(prefix="lpm-bun-engines-path-") as system_bin_dir:
+        lpm_home = smoke_home_path(home_root)
         project_path = Path(project_dir)
         system_bin = Path(system_bin_dir)
         write_package(
@@ -12184,10 +17721,10 @@ def scenario_install_bun_runtime() -> None:
         )
         seed_path_executable(system_bin, "bun", "system-bun-from-path")
 
-        engines_env = {
-            "LPM_HOME": lpm_home,
-            "PATH": os.pathsep.join([str(system_bin), minimal_shell_path]),
-        }
+        engines_env = smoke_home_env(
+            home_root,
+            PATH=os.pathsep.join([str(system_bin), minimal_shell_path]),
+        )
 
         engines_run = run_command_result(
             "install/bun-runtime engines bun ignored run",
@@ -12254,9 +17791,10 @@ def scenario_install_bun_runtime() -> None:
                     "install/bun-runtime engines bun doctor all json: expected only the health probe under --all"
                 )
 
-    with tempfile.TemporaryDirectory(prefix="lpm-bun-managed-home-") as lpm_home, tempfile.TemporaryDirectory(
+    with tempfile.TemporaryDirectory(prefix="lpm-bun-managed-home-") as home_root, tempfile.TemporaryDirectory(
         prefix="lpm-bun-managed-project-"
     ) as project_dir:
+        lpm_home = smoke_home_path(home_root)
         project_path = Path(project_dir)
         bun_invocation_log = Path(lpm_home) / "bun-invocations.log"
         write_package(
@@ -12283,7 +17821,7 @@ def scenario_install_bun_runtime() -> None:
         )
         seed_managed_runtime_executable(lpm_home, "bun", "1.3.14", "shared", "bun-shared")
 
-        managed_env = {"LPM_HOME": lpm_home, "PATH": minimal_shell_path}
+        managed_env = smoke_home_env(home_root, PATH=minimal_shell_path)
 
         show_order = run_command_result(
             "install/bun-runtime managed path order run",
@@ -12302,7 +17840,7 @@ def scenario_install_bun_runtime() -> None:
             )
         require_contains(
             show_order.stderr,
-            "Using node 22.12.0",
+            "Using Node.js 22.12.0",
             "install/bun-runtime managed path order stderr",
         )
         require_contains(
@@ -12368,9 +17906,10 @@ def scenario_install_bun_runtime() -> None:
                 "install/bun-runtime managed shell runner: runtime.bun should not make lpm run invoke bun run"
             )
 
-    with tempfile.TemporaryDirectory(prefix="lpm-bun-noauto-home-") as lpm_home, tempfile.TemporaryDirectory(
+    with tempfile.TemporaryDirectory(prefix="lpm-bun-noauto-home-") as home_root, tempfile.TemporaryDirectory(
         prefix="lpm-bun-noauto-project-"
     ) as project_dir, tempfile.TemporaryDirectory(prefix="lpm-bun-noauto-path-") as system_bin_dir:
+        lpm_home = smoke_home_path(home_root)
         project_path = Path(project_dir)
         system_bin = Path(system_bin_dir)
         write_package(
@@ -12384,11 +17923,11 @@ def scenario_install_bun_runtime() -> None:
         )
         seed_path_executable(system_bin, "bun", "system-bun-fallback")
 
-        no_auto_env = {
-            "LPM_HOME": lpm_home,
-            "LPM_NO_AUTO_INSTALL": "true",
-            "PATH": os.pathsep.join([str(system_bin), minimal_shell_path]),
-        }
+        no_auto_env = smoke_home_env(
+            home_root,
+            LPM_NO_AUTO_INSTALL="true",
+            PATH=os.pathsep.join([str(system_bin), minimal_shell_path]),
+        )
 
         no_auto_run = run_command_result(
             "install/bun-runtime no-auto-install fallback run",
@@ -12488,9 +18027,10 @@ def scenario_install_global_install() -> None:
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
-    ) as lpm_home:
+    ) as home_root:
+        lpm_home = smoke_home_path(home_root)
         registry_args = ["--registry", registry.registry_url, "--insecure"]
-        registry_env = {"LPM_HOME": lpm_home, "LPM_NPM_ROUTE": "proxy"}
+        registry_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
@@ -12669,20 +18209,56 @@ SCENARIOS = {
         "Run lpm dev coverage for .env.example bootstrap, env-schema validation vs --no-env-check, explicit --env layering, hermetic HTTPS consent/bootstrap, tunnel inspector/no-inspect/strict inspect-port behavior, single-service arg forwarding, and multi-service dependsOn orchestration.",
         scenario_install_dev_command,
     ),
+    "install-dev-local-domains": (
+        "Run local-domain lpm dev coverage for host-only auto-port routing, detached proxy auto-start, hosts-file mutation and refusal paths, duplicate-host cleanup, and the HTTPS-listener requirement.",
+        scenario_install_dev_local_domains_command,
+    ),
+    "install-proxy": (
+        "Run lpm proxy coverage for absent status/list output, dry-run service planning, config-backed listener defaults, detached lifecycle, single-service proxy.host routing, and HTTP-to-HTTPS redirect behavior.",
+        scenario_install_proxy_command,
+    ),
+    "install-hosts": (
+        "Run lpm hosts coverage for JSON cleanup with backup creation plus the non-interactive --yes consent guard.",
+        scenario_install_hosts_command,
+    ),
     "install-env": (
         "Run lpm env coverage for required-secret gating, preview-scoped writes, env ls schema counts, and lpm run task injection through named-environment file inheritance.",
         scenario_install_env_command,
+    ),
+    "install-env-pair": (
+        "Run lpm env pair coverage for uppercase code approval, non-TTY refusal without --yes, metadata-rich audit output, successful unpair, and legacy-token rejection.",
+        scenario_install_env_pair_command,
+    ),
+    "install-skills": (
+        "Run lpm skills coverage for empty and grouped list output, validate success and failure envelopes, clean idempotence, and unknown-action errors.",
+        scenario_install_skills_command,
+    ),
+    "install-exec": (
+        "Run lpm exec coverage for dotenv-backed JS execution, forwarded args, and missing-file failures in human and JSON modes.",
+        scenario_install_exec_command,
+    ),
+    "install-dlx": (
+        "Run lpm dlx coverage for cached binary execution with TTL refresh and malformed-spec JSON failure envelopes.",
+        scenario_install_dlx_command,
+    ),
+    "install-swift-registry": (
+        "Run lpm swift-registry coverage for help parsing and H20 refusal on non-loopback HTTP registries before any SwiftPM side effects.",
+        scenario_install_swift_registry_command,
+    ),
+    "install-mcp": (
+        "Run lpm mcp coverage for fresh-home status, JSON status, helpful failures, and setup/remove editor config mutation.",
+        scenario_install_mcp_command,
     ),
     "install-tunnel": (
         "Run lpm tunnel coverage for auth-gated relay actions plus local inspect/log/replay behavior from the on-disk webhook log.",
         scenario_install_tunnel_command,
     ),
     "install-ports": (
-        "Run lpm ports coverage for declared-port listing, missing-port kill failures, live owner termination, and per-project ports.toml reset semantics.",
+        "Run lpm ports coverage for declared-port listing, host-only persisted assignments, missing-port kill failures, live owner termination, and per-project ports.toml reset semantics.",
         scenario_install_ports_command,
     ),
     "install-cert": (
-        "Run lpm cert coverage for absent status, isolated trust-store install/uninstall, generate --host SAN refreshes, and human status output.",
+        "Run lpm cert coverage for absent status, isolated trust-store install/uninstall, generate --host SAN refreshes, extraPermittedDns constrained chains, and human status output.",
         scenario_install_cert_command,
     ),
     "install-doctor": (
@@ -12692,6 +18268,34 @@ SCENARIOS = {
     "install-health": (
         "Run lpm health coverage for healthy JSON output, single health-endpoint probing, and unreachable-registry non-zero exits.",
         scenario_install_health_command,
+    ),
+    "install-ci": (
+        "Run lpm ci coverage for GitHub Actions masking, generic shell exports, output-file writes, setup snippets, and helpful setup error contracts.",
+        scenario_install_ci_commands,
+    ),
+    "install-init": (
+        "Run lpm init coverage for human and JSON success, whoami-based owner inference, fallback owner naming, and .gitattributes creation.",
+        scenario_install_init_command,
+    ),
+    "install-whoami": (
+        "Run lpm whoami coverage for logged-out offline guidance, authenticated account summaries, and bearer-token whoami lookups.",
+        scenario_install_whoami_command,
+    ),
+    "install-logout": (
+        "Run lpm logout coverage for logged-out notices, local-only sign-out, revoke-backed sign-out, and cleared-session follow-up checks.",
+        scenario_install_logout_command,
+    ),
+    "install-deploy": (
+        "Run lpm deploy coverage for dry-run output, JSON envelopes, filter cardinality errors, workspace-boundary safety, and non-empty output rejection.",
+        scenario_install_deploy_command,
+    ),
+    "install-publish": (
+        "Run lpm publish coverage for dry-run validation, target planning, mock-registry success, and catalog dependency rewrites inside uploaded tarballs.",
+        scenario_install_publish_command,
+    ),
+    "install-node-runtime": (
+        "Run managed Node runtime coverage for use/list, early validation failures, pin behavior, mocked installs, JSON install envelopes, and version removal.",
+        scenario_install_node_runtime_command,
     ),
     "install-setup": (
         "Run lpm setup ci/local coverage for renamed command parsing, CI .npmrc generation, and local read-only token setup.",

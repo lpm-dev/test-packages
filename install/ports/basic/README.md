@@ -1,5 +1,5 @@
 Direct `lpm ports` smoke fixture.
 
-- `run_smokes.py install-ports` drives `lpm ports` / `lpm ports list`, `kill`, and `reset` against an isolated `LPM_HOME` plus a temporary listener process bound to a real local port.
-- The smoke pins the documented split between declared service ports and persisted per-project overrides: `list` reports `lpm.json > services.<name>.port` entries, while `reset` only clears this project's `ports.toml` override entry.
-- Assertions cover default human output, `--json` envelopes for `list`, live owner termination via `kill <port>`, the stable `already_free` envelope, and preservation of unrelated `ports.toml` entries during `reset`.
+- `run_smokes.py install-ports` drives declared-service listing, project fallback, system-wide `all` / `--all`, bare-port and explicit `inspect`, single-port kill, range kill with interactive confirmation and `--yes`, `kill --pid`, and `reset` against an isolated `LPM_HOME` plus temporary listener processes bound to real local ports.
+- The smoke pins the documented split between declared service ports and persisted per-project overrides: `list` reports `lpm.json > services.<name>.port` entries, host-only services surface their persisted `ports.toml` assignment, the default fallback lists listeners rooted in the cwd when there are no services, and `reset` only clears this project's override entry.
+- Assertions cover human and JSON output, stdout/stderr cleanliness for JSON mode, project/framework enrichment for listener discovery, live owner termination via `kill <port>`, PID-deduped range kills, explicit PID kills, the stable `already_free` envelope, host-only persisted assignment rows, and preservation of unrelated `ports.toml` entries during `reset`.

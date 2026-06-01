@@ -1,6 +1,8 @@
 {
-  "compilerOptions": {
-    "baseUrl": ".",
+        range_prompt_start = reserve_then_release_port()
+        range_prompt_end = reserve_then_release_port()
+        range_yes_start = reserve_then_release_port()
+        range_yes_end = reserve_then_release_port()
     "paths": {
       "@/*": ["./*"]
     }
