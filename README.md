@@ -32,7 +32,7 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 ## Current Fixtures
 
 - `install/sample` — nested-package install fixture copied from the desktop repro project
-- `install/source-delivery` — clean consumer project for `lpm add`, manifest-backed `lpm remove`, and alias/dependency-injection checks
+- `install/source-delivery` — clean consumer project for simple-path `lpm add`, bare-import surfacing, repeat-download and conflict-prompt coverage, manifest-backed `lpm remove`, and alias/dependency-injection checks
 - `install/config-aware` — clean consumer project for interactive config-aware `lpm add` coverage
 - `install/read-only-routing` — mock-registry fixture for `lpm info`, `lpm resolve`, `lpm search`, and `lpm download` through project-local `.npmrc` routing without the proxy metadata path
 - `install/download` — mock-registry fixture for direct `lpm download` runs, covering canonical `--output` paths, stripped extraction layout, integrity verification, and no install side-effects
@@ -53,8 +53,8 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/migrate/pnpm/patches` — local fixture for `lpm migrate` from pnpm, covering `pnpm.patchedDependencies` translation into `lpm.patchedDependencies`, `originalIntegrity` binding, canonical patch-path preservation, and intact patch bytes on the self-copy path
 - `install/migrate/bun` — local fixture for `lpm migrate` from Bun, covering Bun lockfile detection, LPM lockfile-pair emission, source-lockfile preservation, and `--no-install --no-npmrc` no-side-effect behavior
 - `install/migrate/yarn` — local fixture for `lpm migrate` from Yarn v1, covering Yarn lock detection, mixed dependency plus devDependency conversion, source-lockfile preservation, and `--no-install --no-npmrc` no-side-effect behavior
-- `install/upgrade` — mock-registry fixture for `lpm upgrade` on public-npm lockfile sources, covering dry-run candidate discovery and real end-to-end upgrade application
-- `install/outdated` — mock-registry fixture for `lpm outdated` across `dependencies` and `devDependencies`, including resolved `wanted` vs `latest` semantics plus the shared skipped-private no-leak path with `lpm upgrade --dry-run`
+- `install/upgrade` — mock-registry fixture for `lpm upgrade` on public-npm and configured-registry lockfile sources, covering dry-run candidate discovery and real end-to-end upgrade application
+- `install/outdated` — mock-registry fixture for `lpm outdated` across `dependencies` and `devDependencies`, including resolved `wanted` vs `latest` semantics, configured-registry npm inclusion, and the shared skipped-private no-leak path with `lpm upgrade --dry-run`
 - `install/uninstall` — local uninstall fixture for dependency/devDependency removal, lockfile-pair cleanup, and untouched peer/optional/trusted dependency state
 - `install/create-project-smoke` — migrated single-project fixture for project bootstrap flows
 - `install/e2e-sandbox` — migrated single-project fixture for env/sandbox-related end-to-end checks
@@ -69,7 +69,7 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/minimum-release-age` — mock-registry fixture set for recent-publish cooldown defaults, guarded CLI/package weakeners, and explicit pinned-spec blocking
 - `install/security` — local + mock-registry fixture set for `lpm security status`, guarded `lpm config` writes, guarded repo proposals, default-target `unlock` / `lock` coverage, signed audit-log coverage, and the optional native unlock + project lock success path
 - `install/audit-after-install` — mock-registry fixture set for default-off audit summaries, precedence resolution, JSON envelopes, and informational audit-hook failures
-- `install/audit` — mock-registry fixture for direct `lpm audit` runs, covering default informational high behaviors, `--fail-on=behavior`, and `--secrets --fail-on=secrets`
+- `install/audit` — mock-registry fixture for direct `lpm audit` and `lpm audit fix` runs, covering default informational high behaviors, `--fail-on=behavior`, `--secrets --fail-on=secrets`, canonical/alias fix flows, and custom-registry skip safety
 - `install/query` — mock-registry fixture for direct `lpm query` runs, covering selector matches, `--assert-none`, `--count --json`, and Mermaid output
 - `install/approve-scripts` — mock-registry fixture for direct `lpm approve-scripts` runs, covering blocked-set listing, dry-run named approval preview, and guarded named approval refusal
 - `install/trust` — mock-registry fixture for direct `lpm trust` runs, covering guarded approval refusal plus diff/prune behavior over direct manifest-and-snapshot drift
@@ -77,7 +77,7 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/patch` — mock-registry fixture for direct `lpm patch` and `lpm patch-commit` runs, covering lockfile-based extraction, patch file generation, manifest registration, reinstall auto-apply, pristine re-extracts, and no-change aborts
 - `install/patch/scoped` — mock-registry fixture for scoped `lpm patch` and `lpm patch-commit` runs, covering `/` to `__` filename sanitization, manifest key preservation, and reinstall auto-apply through the sanitized patch path
 - `install/patch/binary` — mock-registry fixture for `lpm patch-commit` rejection of binary edits, covering the error path plus the absence of generated patch files or manifest mutation after the failed commit
-- `install/global-install` — mock-registry fixture set for `install -g` manifest writes, `uninstall -g` cleanup, shim creation, collision hints, and alias-based collision resolution
+- `install/global-install` — mock-registry fixture set for `install -g` manifest writes, `uninstall -g` cleanup, `lpm global` link/unlink/path/list coverage, shim creation, collision hints, outdated reporting, and alias-based collision resolution
 - `workspace/basic` — minimal workspace fixture with one local package and one app consuming it
 - `workspace/complex` — larger workspace fixture with multiple apps, shared packages, and transitive workspace links
 - `workspace/nested-boundary` — workspace fixture with a nested non-workspace child package for boundary regressions

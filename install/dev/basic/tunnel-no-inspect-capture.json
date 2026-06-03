@@ -1,7 +1,7 @@
 {
   "args": [
     "--port",
-    "56391",
+    "52952",
     "--capture",
     "tunnel-no-inspect-capture.json"
   ],

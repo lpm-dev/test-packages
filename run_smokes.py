@@ -3630,6 +3630,224 @@ def scenario_install_remove() -> None:
         require_not_exists(fixture / ".lpm" / "added-sources.json")
 
 
+def scenario_install_simple_source_delivery() -> None:
+    package_name = "smoke-simple-source"
+    version = "1.0.0"
+    updated_version = "1.0.1"
+    tarball_path = f"/tarballs/{package_name}/-/{package_name}-{version}.tgz"
+    updated_tarball_path = f"/tarballs/{package_name}/-/{package_name}-{updated_version}.tgz"
+    original_component = "".join(
+        [
+            'import { useState } from "react";\n',
+            'import { Slot } from "@radix-ui/react-slot";\n',
+            'import { cn } from "./utils";\n',
+            'export const Button = () => cn(String(useState), String(Slot));\n',
+        ]
+    )
+    updated_component = "".join(
+        [
+            'import { useState } from "react";\n',
+            'import { Slot } from "@radix-ui/react-slot";\n',
+            'import { cn } from "./utils";\n',
+            'export const Button = () => cn("updated", String(useState), String(Slot));\n',
+        ]
+    )
+    registry_packages = [
+        {
+            "name": package_name,
+            "dist_tags": {"latest": version},
+            "versions": {
+                version: {
+                    "metadata_extra": {"dependencies": {"react": "^18.0.0"}},
+                    "package_json_extra": {
+                        "main": "component.js",
+                        "dependencies": {"react": "^18.0.0"},
+                    },
+                    "files": {
+                        "component.js": original_component,
+                        "utils.js": "export const cn = (...segments) => segments.join(\" \")\n",
+                    },
+                },
+                updated_version: {
+                    "metadata_extra": {"dependencies": {"react": "^18.0.0"}},
+                    "package_json_extra": {
+                        "main": "component.js",
+                        "dependencies": {"react": "^18.0.0"},
+                    },
+                    "files": {
+                        "component.js": updated_component,
+                        "utils.js": "export const cn = (...segments) => segments.join(\" \")\n",
+                    },
+                },
+            },
+        }
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        fixture = reset_source_delivery_fixture()
+        write_registry_npmrc(fixture, registry.registry_url)
+        scenario_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
+        original_manifest = (fixture / "package.json").read_bytes()
+
+        human_result = run_command_result(
+            "install/source-delivery simple-path human add",
+            fixture,
+            [
+                str(LPM_BIN),
+                "add",
+                package_name,
+                "--yes",
+                "--path",
+                "custom/simple",
+                "--no-skills",
+                "--no-editor-setup",
+            ],
+            extra_env=scenario_env,
+        )
+        if human_result.returncode != 0:
+            raise SmokeFailure(
+                "install/source-delivery simple-path human add failed with exit code "
+                f"{human_result.returncode}"
+            )
+
+        human_output = human_result.stdout + human_result.stderr
+        require_contains(
+            human_output,
+            f"Downloading source package {package_name}@{version}",
+            "install/source-delivery simple-path human output package banner",
+        )
+        require_contains(
+            human_output,
+            "Source uses external imports:",
+            "install/source-delivery simple-path bare-import notice",
+        )
+        require_contains(
+            human_output,
+            "react",
+            "install/source-delivery simple-path bare-import notice",
+        )
+        require_contains(
+            human_output,
+            "@radix-ui/react-slot",
+            "install/source-delivery simple-path bare-import notice",
+        )
+        require_contains(
+            human_output,
+            "Done · added ",
+            "install/source-delivery simple-path completion",
+        )
+
+        require_exists(fixture / "custom" / "simple" / "index.js")
+        require_exists(fixture / "custom" / "simple" / "component.js")
+        require_exists(fixture / "custom" / "simple" / "utils.js")
+        require_not_exists(fixture / "custom" / "simple" / package_name)
+
+        if (fixture / "package.json").read_bytes() != original_manifest:
+            raise SmokeFailure(
+                "install/source-delivery simple-path human add: expected package.json to stay byte-identical"
+            )
+
+        json_result = run_command_result(
+            "install/source-delivery simple-path json add",
+            fixture,
+            [
+                str(LPM_BIN),
+                "add",
+                f"{package_name}@{version}",
+                "--json",
+                "--path",
+                "custom/json",
+                "--no-skills",
+                "--no-editor-setup",
+            ],
+            extra_env=scenario_env,
+        )
+        if json_result.returncode != 0:
+            raise SmokeFailure(
+                "install/source-delivery simple-path json add failed with exit code "
+                f"{json_result.returncode}"
+            )
+
+        json_envelope = parse_json_stdout(
+            "install/source-delivery simple-path json add",
+            json_result,
+        )
+        if json_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/source-delivery simple-path json add: expected success=true JSON envelope"
+            )
+        if json_envelope.get("package", {}).get("name") != package_name:
+            raise SmokeFailure(
+                "install/source-delivery simple-path json add: expected verbatim npm package name"
+            )
+
+        external_imports = json_envelope.get("external_imports")
+        if not isinstance(external_imports, list):
+            raise SmokeFailure(
+                "install/source-delivery simple-path json add: expected external_imports array"
+            )
+        external_imports_set = set(external_imports)
+        if "react" not in external_imports_set or "@radix-ui/react-slot" not in external_imports_set:
+            raise SmokeFailure(
+                "install/source-delivery simple-path json add: expected react and @radix-ui/react-slot external imports"
+            )
+        if "./utils" in external_imports_set:
+            raise SmokeFailure(
+                "install/source-delivery simple-path json add: relative imports must not appear in external_imports"
+            )
+
+        repeated_tarball_requests = sum(
+            1 for path in registry.requested_paths() if path == tarball_path
+        )
+        if repeated_tarball_requests != 2:
+            raise SmokeFailure(
+                "install/source-delivery simple-path add: expected repeated adds to re-download the same tarball"
+            )
+
+        original_component_bytes = (fixture / "custom" / "simple" / "component.js").read_bytes()
+        conflict_output = run_interactive_command(
+            "install/source-delivery simple-path conflict add",
+            fixture,
+            [
+                str(LPM_BIN),
+                "add",
+                f"{package_name}@{updated_version}",
+                "--path",
+                "custom/simple",
+                "--alias",
+                "@/",
+                "--no-skills",
+                "--no-editor-setup",
+            ],
+            prompts=[("How to handle?", "\n")],
+            extra_env=scenario_env,
+        )
+        require_contains(
+            conflict_output,
+            "File exists: component.js",
+            "install/source-delivery simple-path conflict output",
+        )
+        require_contains(
+            conflict_output,
+            "How to handle?",
+            "install/source-delivery simple-path conflict prompt",
+        )
+        if (fixture / "custom" / "simple" / "component.js").read_bytes() != original_component_bytes:
+            raise SmokeFailure(
+                "install/source-delivery simple-path conflict add: expected default skip to keep the existing file"
+            )
+
+        updated_tarball_requests = sum(
+            1 for path in registry.requested_paths() if path == updated_tarball_path
+        )
+        if updated_tarball_requests != 1:
+            raise SmokeFailure(
+                "install/source-delivery simple-path conflict add: expected the updated tarball to be fetched once"
+            )
+
+
 def scenario_install_project_discovery() -> None:
     nearest = reset_project_discovery_nearest_fixture()
     nested_cwd = nearest / "apps" / "web" / "src"
@@ -4184,8 +4402,8 @@ def scenario_install_outdated() -> None:
 def scenario_install_outdated_skipped_private() -> None:
     private_package = "smoke-private-skip"
     skipped_private_reason = (
-        "Packages without a recorded npm-public source were skipped to avoid leaking private names "
-        "to registry.npmjs.org. Run `lpm install` to resolve sources, then re-run."
+        "Packages without a recorded public npm or LPM-registry source were skipped to avoid leaking "
+        "private names to registry.npmjs.org. Run `lpm install` to resolve sources, then re-run."
     )
 
     with MockRegistry([]) as registry, tempfile.TemporaryDirectory(
@@ -4292,6 +4510,147 @@ def scenario_install_outdated_skipped_private() -> None:
                 "install/outdated skipped-private request log: expected no registry request for the internal package, got "
                 + ", ".join(leaked_paths)
             )
+
+
+def scenario_install_outdated_upgrade_configured_registry() -> None:
+    package_name = "smoke-configured-registry-lib"
+    registry_packages = [
+        {
+            "name": package_name,
+            "dist_tags": {"latest": "2.1.4"},
+            "versions": {
+                "2.1.3": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                },
+                "2.1.4": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                },
+            },
+        }
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        fixture = reset_upgrade_fixture()
+        delete_path(fixture / "node_modules")
+        delete_path(fixture / "lpm.lock")
+        delete_path(fixture / "lpm.lockb")
+        write_package_json(
+            fixture / "package.json",
+            {
+                "name": "configured-registry-upgrade-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {package_name: "2.1.3"},
+            },
+        )
+        write_registry_npmrc(fixture, registry.registry_url)
+
+        scenario_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
+        registry_args = ["--registry", registry.registry_url, "--insecure"]
+        install_flags = [
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+
+        run_command(
+            "install/outdated-upgrade configured-registry install",
+            fixture,
+            [str(LPM_BIN), *registry_args, "install", *install_flags],
+            extra_env=scenario_env,
+        )
+
+        outdated_result = run_command_result(
+            "install/outdated-upgrade configured-registry outdated json",
+            fixture,
+            [str(LPM_BIN), *registry_args, "outdated", "--json"],
+            extra_env=scenario_env,
+        )
+        if outdated_result.returncode != 0:
+            raise SmokeFailure(
+                "install/outdated-upgrade configured-registry outdated json failed with exit code "
+                f"{outdated_result.returncode}"
+            )
+
+        outdated_envelope = parse_json_stdout(
+            "install/outdated-upgrade configured-registry outdated json",
+            outdated_result,
+        )
+        if outdated_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/outdated-upgrade configured-registry outdated json: expected success=true"
+            )
+        if outdated_envelope.get("count") != 1 or outdated_envelope.get("outdated_count") != 1:
+            raise SmokeFailure(
+                "install/outdated-upgrade configured-registry outdated json: expected exactly one eligible outdated package"
+            )
+        outdated_packages = outdated_envelope.get("packages", [])
+        if not isinstance(outdated_packages, list) or len(outdated_packages) != 1:
+            raise SmokeFailure(
+                "install/outdated-upgrade configured-registry outdated json: expected a single outdated row"
+            )
+        outdated_row = outdated_packages[0]
+        if outdated_row.get("name") != package_name:
+            raise SmokeFailure(
+                "install/outdated-upgrade configured-registry outdated json: expected the configured-registry package name in the result"
+            )
+        if outdated_row.get("current") != "2.1.3" or outdated_row.get("latest") != "2.1.4":
+            raise SmokeFailure(
+                "install/outdated-upgrade configured-registry outdated json: expected current=2.1.3 and latest=2.1.4"
+            )
+        if "skipped_private" in outdated_envelope:
+            raise SmokeFailure(
+                "install/outdated-upgrade configured-registry outdated json: configured-registry npm packages must not be reported as private skips"
+            )
+
+        write_package_json(
+            fixture / "package.json",
+            {
+                "name": "configured-registry-upgrade-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {package_name: "^2.1.3"},
+            },
+        )
+
+        run_command(
+            "install/outdated-upgrade configured-registry applies upgrade",
+            fixture,
+            [str(LPM_BIN), *registry_args, "upgrade", "-y"],
+            extra_env=scenario_env,
+        )
+
+        if read_dependency_spec(fixture / "package.json", package_name) != "^2.1.4":
+            raise SmokeFailure(
+                "install/outdated-upgrade configured-registry package.json: expected the dependency range to update to ^2.1.4"
+            )
+        if read_installed_package_version(fixture, package_name) != "2.1.4":
+            raise SmokeFailure(
+                "install/outdated-upgrade configured-registry node_modules: expected 2.1.4 to be installed"
+            )
+
+        lockfile_text = read_optional_text(fixture / "lpm.lock")
+        require_contains(
+            lockfile_text,
+            f'name = "{package_name}"',
+            "install/outdated-upgrade configured-registry lpm.lock",
+        )
+        require_contains(
+            lockfile_text,
+            'version = "2.1.4"',
+            "install/outdated-upgrade configured-registry lpm.lock",
+        )
+        require_contains(
+            lockfile_text,
+            'tarball = "',
+            "install/outdated-upgrade configured-registry lpm.lock",
+        )
 
 
 def scenario_install_read_only_routing() -> None:
@@ -6457,6 +6816,302 @@ def scenario_install_audit_command() -> None:
             if len(findings) != 1 or findings[0].get("package") != "leaky-pkg":
                 raise SmokeFailure(
                     "install/audit secrets json: expected one finding for leaky-pkg"
+                )
+    finally:
+        osv_server.shutdown()
+        osv_server.server_close()
+        osv_thread.join(timeout=5)
+
+
+def scenario_install_audit_fix_command() -> None:
+    registry_packages = [
+        {
+            "name": "vuln-pkg",
+            "dist_tags": {"latest": "1.0.1"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"license": "MIT"},
+                    "files": {
+                        "index.js": "module.exports = 'vulnerable'\n",
+                    },
+                },
+                "1.0.1": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"license": "MIT"},
+                    "files": {
+                        "index.js": "module.exports = 'fixed'\n",
+                    },
+                },
+            },
+        }
+    ]
+
+    osv_payload = json.dumps(
+        {
+            "results": [
+                {
+                    "vulns": [
+                        {
+                            "id": "GHSA-smoke-fix",
+                            "summary": "test vulnerability",
+                            "severity": [{"type": "CVSS_V3", "score": "9.8"}],
+                            "affected": [
+                                {
+                                    "package": {"ecosystem": "npm", "name": "vuln-pkg"},
+                                    "ranges": [
+                                        {
+                                            "type": "SEMVER",
+                                            "events": [
+                                                {"introduced": "0"},
+                                                {"fixed": "1.0.1"},
+                                            ],
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    ]
+                }
+            ]
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    osv_server = LocalRegistryServer({"/v1/querybatch": ("application/json", osv_payload)})
+    osv_thread = threading.Thread(target=osv_server.serve_forever, daemon=True)
+    osv_thread.start()
+
+    def prepare_fixture(name: str, registry_url: str) -> Path:
+        fixture = reset_audit_command_fixture()
+        delete_path(fixture / "node_modules")
+        delete_path(fixture / "lpm.lock")
+        delete_path(fixture / "lpm.lockb")
+        write_package_json(
+            fixture / "package.json",
+            {
+                "name": name,
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {"vuln-pkg": "1.0.0"},
+            },
+        )
+        write_registry_npmrc(fixture, registry_url)
+        return fixture
+
+    def rewrite_lockfile_source(fixture: Path, target_source: str) -> None:
+        lockfile_path = fixture / "lpm.lock"
+        lockfile_text = read_optional_text(lockfile_path)
+        for source_url in [registry.registry_url, registry.registry_url.rstrip("/")]:
+            source_line = f'source = "registry+{source_url}"'
+            if source_line in lockfile_text:
+                lockfile_path.write_text(
+                    lockfile_text.replace(
+                        source_line,
+                        f'source = "registry+{target_source}"',
+                        1,
+                    ),
+                    encoding="utf-8",
+                )
+                return
+
+        raise SmokeFailure(
+            "install/audit-fix lockfile source rewrite: expected the installed vuln-pkg source line in lpm.lock"
+        )
+
+    try:
+        host, port = osv_server.server_address
+        osv_url = f"http://{host}:{port}/v1/querybatch"
+
+        with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+            prefix="lpm-smoke-home-"
+        ) as home_root:
+            registry_args = ["--registry", registry.registry_url, "--insecure"]
+            scenario_env = smoke_home_env(home_root, LPM_OSV_URL=osv_url)
+            install_flags = [
+                "--no-skills",
+                "--no-editor-setup",
+                "--no-security-summary",
+            ]
+
+            dry_run_fixture = prepare_fixture("audit-fix-dry-run-smoke", registry.registry_url)
+            run_command(
+                "install/audit-fix install dry-run fixture",
+                dry_run_fixture,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=scenario_env,
+            )
+            rewrite_lockfile_source(dry_run_fixture, "https://registry.npmjs.org")
+
+            dry_run_result = run_command_result(
+                "install/audit-fix alias dry-run json",
+                dry_run_fixture,
+                [str(LPM_BIN), *registry_args, "--json", "audit", "--fix", "--dry-run"],
+                extra_env=scenario_env,
+            )
+            if dry_run_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/audit-fix alias dry-run json failed with exit code "
+                    f"{dry_run_result.returncode}"
+                )
+            dry_run_envelope = parse_json_stdout(
+                "install/audit-fix alias dry-run json",
+                dry_run_result,
+            )
+            if dry_run_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/audit-fix alias dry-run json: expected success=true"
+                )
+            if dry_run_envelope.get("dry_run") is not True:
+                raise SmokeFailure(
+                    "install/audit-fix alias dry-run json: expected dry_run=true"
+                )
+            if dry_run_envelope.get("planned") != 1 or dry_run_envelope.get("fixed") != 0:
+                raise SmokeFailure(
+                    "install/audit-fix alias dry-run json: expected planned=1 and fixed=0"
+                )
+            dry_run_packages = dry_run_envelope.get("packages", [])
+            if not isinstance(dry_run_packages, list) or len(dry_run_packages) != 1:
+                raise SmokeFailure(
+                    "install/audit-fix alias dry-run json: expected a single fix plan"
+                )
+            dry_run_plan = dry_run_packages[0]
+            if dry_run_plan.get("name") != "vuln-pkg":
+                raise SmokeFailure(
+                    "install/audit-fix alias dry-run json: expected vuln-pkg in the fix plan"
+                )
+            if dry_run_plan.get("to") != "1.0.1":
+                raise SmokeFailure(
+                    "install/audit-fix alias dry-run json: expected the planned target version to be 1.0.1"
+                )
+            if read_dependency_spec(dry_run_fixture / "package.json", "vuln-pkg") != "1.0.0":
+                raise SmokeFailure(
+                    "install/audit-fix alias dry-run package.json: expected no manifest mutation"
+                )
+            if read_installed_package_version(dry_run_fixture, "vuln-pkg") != "1.0.0":
+                raise SmokeFailure(
+                    "install/audit-fix alias dry-run node_modules: expected no installed-version mutation"
+                )
+
+            apply_fixture = prepare_fixture("audit-fix-apply-smoke", registry.registry_url)
+            run_command(
+                "install/audit-fix install apply fixture",
+                apply_fixture,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=scenario_env,
+            )
+            rewrite_lockfile_source(apply_fixture, "https://registry.npmjs.org")
+
+            apply_result = run_command_result(
+                "install/audit-fix canonical apply json",
+                apply_fixture,
+                [str(LPM_BIN), *registry_args, "--json", "audit", "fix"],
+                extra_env=scenario_env,
+            )
+            if apply_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/audit-fix canonical apply json failed with exit code "
+                    f"{apply_result.returncode}"
+                )
+            apply_envelope = parse_json_stdout(
+                "install/audit-fix canonical apply json",
+                apply_result,
+            )
+            if apply_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/audit-fix canonical apply json: expected success=true"
+                )
+            if apply_envelope.get("dry_run") is not False:
+                raise SmokeFailure(
+                    "install/audit-fix canonical apply json: expected dry_run=false"
+                )
+            if apply_envelope.get("planned") != 1 or apply_envelope.get("fixed") != 1:
+                raise SmokeFailure(
+                    "install/audit-fix canonical apply json: expected planned=1 and fixed=1"
+                )
+            apply_packages = apply_envelope.get("packages", [])
+            if not isinstance(apply_packages, list) or len(apply_packages) != 1:
+                raise SmokeFailure(
+                    "install/audit-fix canonical apply json: expected a single applied fix"
+                )
+            apply_plan = apply_packages[0]
+            if apply_plan.get("name") != "vuln-pkg" or apply_plan.get("to") != "1.0.1":
+                raise SmokeFailure(
+                    "install/audit-fix canonical apply json: expected vuln-pkg to be upgraded to 1.0.1"
+                )
+            if read_dependency_spec(apply_fixture / "package.json", "vuln-pkg") != "1.0.1":
+                raise SmokeFailure(
+                    "install/audit-fix canonical apply package.json: expected the direct dependency range to update to 1.0.1"
+                )
+            if read_installed_package_version(apply_fixture, "vuln-pkg") != "1.0.1":
+                raise SmokeFailure(
+                    "install/audit-fix canonical apply node_modules: expected node_modules to refresh to 1.0.1"
+                )
+            lockfile_text = read_optional_text(apply_fixture / "lpm.lock")
+            require_contains(
+                lockfile_text,
+                'name = "vuln-pkg"',
+                "install/audit-fix canonical apply lockfile",
+            )
+            require_contains(
+                lockfile_text,
+                'version = "1.0.1"',
+                "install/audit-fix canonical apply lockfile",
+            )
+
+            skipped_fixture = prepare_fixture("audit-fix-skipped-smoke", registry.registry_url)
+            run_command(
+                "install/audit-fix install skipped fixture",
+                skipped_fixture,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=scenario_env,
+            )
+            rewrite_lockfile_source(skipped_fixture, "https://npm.internal.example.com")
+
+            skipped_result = run_command_result(
+                "install/audit-fix skipped custom-registry json",
+                skipped_fixture,
+                [str(LPM_BIN), *registry_args, "--json", "audit", "fix", "--dry-run"],
+                extra_env=scenario_env,
+            )
+            if skipped_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/audit-fix skipped custom-registry json failed with exit code "
+                    f"{skipped_result.returncode}"
+                )
+            skipped_envelope = parse_json_stdout(
+                "install/audit-fix skipped custom-registry json",
+                skipped_result,
+            )
+            if skipped_envelope.get("planned") != 0 or skipped_envelope.get("fixed") != 0:
+                raise SmokeFailure(
+                    "install/audit-fix skipped custom-registry json: expected no planned or applied fixes"
+                )
+            if skipped_envelope.get("packages") != []:
+                raise SmokeFailure(
+                    "install/audit-fix skipped custom-registry json: expected packages=[]"
+                )
+            skipped_rows = skipped_envelope.get("skipped", [])
+            if not isinstance(skipped_rows, list) or len(skipped_rows) != 1:
+                raise SmokeFailure(
+                    "install/audit-fix skipped custom-registry json: expected one skipped package"
+                )
+            skipped_row = skipped_rows[0]
+            if skipped_row.get("name") != "vuln-pkg":
+                raise SmokeFailure(
+                    "install/audit-fix skipped custom-registry json: expected vuln-pkg in the skipped list"
+                )
+            reason = skipped_row.get("reason")
+            if not isinstance(reason, str) or "configured LPM registry" not in reason:
+                raise SmokeFailure(
+                    "install/audit-fix skipped custom-registry json: expected the no-leak custom-registry explanation"
+                )
+            if read_dependency_spec(skipped_fixture / "package.json", "vuln-pkg") != "1.0.0":
+                raise SmokeFailure(
+                    "install/audit-fix skipped custom-registry package.json: expected no manifest mutation"
+                )
+            if read_installed_package_version(skipped_fixture, "vuln-pkg") != "1.0.0":
+                raise SmokeFailure(
+                    "install/audit-fix skipped custom-registry node_modules: expected the installed version to stay at 1.0.0"
                 )
     finally:
         osv_server.shutdown()
@@ -12595,6 +13250,170 @@ def scenario_install_dlx_command() -> None:
             )
 
 
+def scenario_install_lpx_command() -> None:
+    def write_project(project_path: Path, name: str) -> bytes:
+        project_path.mkdir(parents=True, exist_ok=True)
+        package_json_bytes = (
+            json.dumps({"name": name, "version": "1.0.0"}) + "\n"
+        ).encode("utf-8")
+        project_path.joinpath("package.json").write_bytes(package_json_bytes)
+        return package_json_bytes
+
+    def deterministic_hash(value: str) -> str:
+        fnv_offset = 0xCBF29CE484222325
+        fnv_prime = 0x00000100000001B3
+        hash_value = fnv_offset
+        for byte in value.encode("utf-8"):
+            hash_value ^= byte
+            hash_value = (hash_value * fnv_prime) & 0xFFFFFFFFFFFFFFFF
+        return f"{hash_value:016x}"
+
+    def seed_dlx_cache(
+        lpm_home: Path,
+        spec: str,
+        package_name: str,
+        installed_package_json: str,
+    ) -> Path:
+        cache_dir = lpm_home / "cache" / "dlx" / deterministic_hash(spec)
+        bin_dir = cache_dir / "node_modules" / ".bin"
+        package_dir = cache_dir / "node_modules" / package_name
+        bin_dir.mkdir(parents=True, exist_ok=True)
+        package_dir.mkdir(parents=True, exist_ok=True)
+        cache_dir.joinpath("package.json").write_text(
+            '{"private":true}',
+            encoding="utf-8",
+        )
+        package_dir.joinpath("package.json").write_text(
+            installed_package_json,
+            encoding="utf-8",
+        )
+        return cache_dir
+
+    def parse_prefixed_json(label: str, stdout: str) -> dict[str, object]:
+        start = stdout.find("{")
+        if start == -1:
+            raise SmokeFailure(f"{label}: expected a JSON object in stdout")
+        try:
+            payload = json.loads(stdout[start:])
+        except json.JSONDecodeError as error:
+            raise SmokeFailure(
+                f"{label}: expected valid JSON after any human prelude, got {stdout!r}"
+            ) from error
+        if not isinstance(payload, dict):
+            raise SmokeFailure(f"{label}: expected top-level JSON object")
+        return payload
+
+    def prepare_lpx_binary(target_dir: Path) -> Path:
+        alias_path = target_dir / "lpx"
+        delete_path(alias_path)
+        try:
+            alias_path.symlink_to(LPM_BIN)
+        except OSError:
+            shutil.copy2(LPM_BIN, alias_path)
+            os.chmod(alias_path, os.stat(alias_path).st_mode | 0o111)
+        return alias_path
+
+    with tempfile.TemporaryDirectory(prefix="lpm-lpx-cache-hit-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-lpx-cache-hit-project-"
+    ) as project_root:
+        lpm_home = Path(home_root) / ".lpm"
+        env = smoke_home_env(home_root)
+        project_path = Path(project_root)
+        original_manifest = write_project(project_path, "lpx-test")
+        lpx_bin = prepare_lpx_binary(project_path)
+
+        spec = "npm-check-updates@1.0.0"
+        cache_dir = seed_dlx_cache(
+            lpm_home,
+            spec,
+            "npm-check-updates",
+            '{"name":"npm-check-updates","bin":{"ncu":"./build/cli.js"}}',
+        )
+        bin_path = cache_dir / "node_modules" / ".bin" / "ncu"
+        write_executable(
+            bin_path,
+            '#!/bin/sh\nprintf "cwd:%s\\nargs:%s\\n" "$PWD" "$*"\n',
+        )
+
+        package_json_path = cache_dir / "package.json"
+        before = time.time() - 60
+        os.utime(package_json_path, (before, before))
+
+        cache_hit_result = run_command_result(
+            "install/lpx cache hit",
+            project_path,
+            [str(lpx_bin), spec, "--", "--loud", "hello"],
+            extra_env=env,
+        )
+        if cache_hit_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/lpx cache hit failed with exit code {cache_hit_result.returncode}"
+            )
+        require_contains(
+            cache_hit_result.stdout,
+            f"cwd:{project_path.resolve()}",
+            "install/lpx cache hit stdout",
+        )
+        require_contains(
+            cache_hit_result.stdout,
+            "args:--loud hello",
+            "install/lpx cache hit stdout",
+        )
+        require_contains(
+            cache_hit_result.stderr,
+            "› Resolving npm-check-updates@1.0.0",
+            "install/lpx cache hit stderr",
+        )
+        require_contains(
+            cache_hit_result.stderr,
+            "› Reusing dlx cache entry (fresh)",
+            "install/lpx cache hit stderr",
+        )
+        after = package_json_path.stat().st_mtime
+        if after <= before:
+            raise SmokeFailure(
+                "install/lpx cache hit: expected the dlx cache entry mtime to be refreshed after successful execution"
+            )
+        if project_path.joinpath("package.json").read_bytes() != original_manifest:
+            raise SmokeFailure(
+                "install/lpx cache hit package.json: expected the project manifest to stay unchanged"
+            )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-lpx-malformed-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-lpx-malformed-project-"
+    ) as project_root:
+        env = smoke_home_env(home_root)
+        project_path = Path(project_root)
+        write_project(project_path, "lpx-malformed")
+        lpx_bin = prepare_lpx_binary(project_path)
+
+        malformed_result = run_command_result(
+            "install/lpx malformed spec json",
+            project_path,
+            [str(lpx_bin), "--json", "@@@"],
+            extra_env=env,
+        )
+        if malformed_result.returncode == 0:
+            raise SmokeFailure(
+                "install/lpx malformed spec json: expected a non-zero exit"
+            )
+        malformed_envelope = parse_prefixed_json(
+            "install/lpx malformed spec json",
+            malformed_result.stdout,
+        )
+        if malformed_envelope.get("success") is not False:
+            raise SmokeFailure(
+                "install/lpx malformed spec json: expected success=false"
+            )
+        error_message = malformed_envelope.get("error")
+        if not isinstance(error_message, str) or (
+            "range" not in error_message and "invalid" not in error_message
+        ):
+            raise SmokeFailure(
+                "install/lpx malformed spec json: expected the resolver parse error in the JSON envelope"
+            )
+
+
 def scenario_install_swift_registry_command() -> None:
     def write_project(project_path: Path, name: str) -> None:
         project_path.mkdir(parents=True, exist_ok=True)
@@ -18144,6 +18963,440 @@ def scenario_install_global_install() -> None:
         )
 
 
+def scenario_install_global_commands() -> None:
+    registry_package = "demo-cli"
+    registry_bin = "demo"
+    local_package = "linked-tool"
+    collision_package = "collision-tool"
+    registry_packages = [
+        {
+            "name": registry_package,
+            "dist_tags": {"latest": "2.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "bin": {registry_bin: "bin/cli.js"},
+                        "dependencies": {},
+                    },
+                    "package_json_extra": {
+                        "bin": {registry_bin: "bin/cli.js"},
+                    },
+                    "files": {
+                        "bin/cli.js": "#!/usr/bin/env node\nprocess.stdout.write('demo@1.0.0\\n')\n",
+                    },
+                },
+                "1.5.0": {
+                    "metadata_extra": {
+                        "bin": {registry_bin: "bin/cli.js"},
+                        "dependencies": {},
+                    },
+                    "package_json_extra": {
+                        "bin": {registry_bin: "bin/cli.js"},
+                    },
+                    "files": {
+                        "bin/cli.js": "#!/usr/bin/env node\nprocess.stdout.write('demo@1.5.0\\n')\n",
+                    },
+                },
+                "2.0.0": {
+                    "metadata_extra": {
+                        "bin": {registry_bin: "bin/cli.js"},
+                        "dependencies": {},
+                    },
+                    "package_json_extra": {
+                        "bin": {registry_bin: "bin/cli.js"},
+                    },
+                    "files": {
+                        "bin/cli.js": "#!/usr/bin/env node\nprocess.stdout.write('demo@2.0.0\\n')\n",
+                    },
+                },
+            },
+        }
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        lpm_home = smoke_home_path(home_root)
+        fixture = reset_global_install_fixture("basic")
+        baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
+        registry_args = ["--registry", registry.registry_url, "--insecure"]
+        registry_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
+        install_flags = [
+            "--no-skills",
+            "--no-editor-setup",
+        ]
+
+        run_command(
+            "install/global-commands install registry package",
+            fixture,
+            [
+                str(LPM_BIN),
+                *registry_args,
+                "install",
+                "-g",
+                f"{registry_package}@1.0.0",
+                *install_flags,
+            ],
+            extra_env=registry_env,
+        )
+
+        manifest_path = Path(lpm_home) / "global" / "manifest.toml"
+        manifest_text = read_optional_text(manifest_path)
+        if 'saved_spec = "1.0.0"' in manifest_text:
+            manifest_path.write_text(
+                manifest_text.replace('saved_spec = "1.0.0"', 'saved_spec = "^1.0.0"', 1),
+                encoding="utf-8",
+            )
+            manifest_text = read_optional_text(manifest_path)
+        if 'saved_spec = "^1.0.0"' not in manifest_text:
+            raise SmokeFailure(
+                "install/global-commands manifest: expected the registry package saved_spec to be writable to ^1.0.0"
+            )
+
+        local_package_dir = fixture / local_package
+        write_package_json(
+            local_package_dir / "package.json",
+            {
+                "name": local_package,
+                "version": "1.2.3",
+                "bin": {local_package: f"bin/{local_package}"},
+            },
+        )
+        write_executable(
+            local_package_dir / "bin" / local_package,
+            '#!/bin/sh\nprintf "linked-tool:%s\\n" "$1"\n',
+        )
+
+        link_result = run_command_result(
+            "install/global-commands link local package json",
+            fixture,
+            [str(LPM_BIN), "--json", "global", "link", local_package],
+            extra_env=registry_env,
+        )
+        if link_result.returncode != 0:
+            raise SmokeFailure(
+                "install/global-commands link local package json failed with exit code "
+                f"{link_result.returncode}"
+            )
+        link_envelope = parse_json_stdout(
+            "install/global-commands link local package json",
+            link_result,
+        )
+        if link_envelope.get("package") != local_package:
+            raise SmokeFailure(
+                "install/global-commands link json: expected the linked package name in the envelope"
+            )
+        if link_envelope.get("version") != "1.2.3":
+            raise SmokeFailure(
+                "install/global-commands link json: expected version=1.2.3"
+            )
+        if link_envelope.get("commands") != [local_package]:
+            raise SmokeFailure(
+                "install/global-commands link json: expected linked-tool to expose its declared bin"
+            )
+
+        linked_shim = resolve_global_shim_path(lpm_home, local_package)
+        require_exists(linked_shim)
+        require_contains(
+            run_command(
+                "install/global-commands linked shim output",
+                fixture,
+                [str(linked_shim), "ok"],
+            ),
+            "linked-tool:ok",
+            "install/global-commands linked shim output",
+        )
+
+        path_result = run_command_result(
+            "install/global-commands path for local link",
+            fixture,
+            [str(LPM_BIN), "global", "path", local_package],
+            extra_env=registry_env,
+        )
+        if path_result.returncode != 0:
+            raise SmokeFailure(
+                "install/global-commands path for local link failed with exit code "
+                f"{path_result.returncode}"
+            )
+        expected_linked_path = str(local_package_dir.resolve())
+        if path_result.stdout.strip() != expected_linked_path:
+            raise SmokeFailure(
+                "install/global-commands path for local link: expected stdout to equal the linked checkout path"
+            )
+
+        list_verbose_result = run_command_result(
+            "install/global-commands list verbose json",
+            fixture,
+            [str(LPM_BIN), "--json", "global", "list", "--verbose"],
+            extra_env=registry_env,
+        )
+        if list_verbose_result.returncode != 0:
+            raise SmokeFailure(
+                "install/global-commands list verbose json failed with exit code "
+                f"{list_verbose_result.returncode}"
+            )
+        list_verbose_envelope = parse_json_stdout(
+            "install/global-commands list verbose json",
+            list_verbose_result,
+        )
+        if list_verbose_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected success=true"
+            )
+        if list_verbose_envelope.get("count") != 2:
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected exactly two global packages"
+            )
+        package_rows = {
+            package.get("name"): package
+            for package in list_verbose_envelope.get("packages", [])
+            if isinstance(package, dict) and isinstance(package.get("name"), str)
+        }
+        registry_row = package_rows.get(registry_package)
+        linked_row = package_rows.get(local_package)
+        if registry_row is None or linked_row is None:
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected both the registry and linked package rows"
+            )
+
+        expected_registry_root = str(
+            Path(lpm_home) / "global" / "installs" / f"{registry_package}@1.0.0"
+        )
+        if registry_row.get("version") != "1.0.0":
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected the registry package current version to stay at 1.0.0"
+            )
+        if registry_row.get("commands") != [registry_bin]:
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected the registry package command list to contain demo"
+            )
+        if registry_row.get("root") != expected_registry_root:
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected the registry package root path to match the global install root"
+            )
+        if not registry_row.get("installed_at"):
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected installed_at for the registry package"
+            )
+        if not isinstance(registry_row.get("bytes_on_disk"), int) or registry_row.get("bytes_on_disk") <= 0:
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected a positive bytes_on_disk value for the registry package"
+            )
+        if not registry_row.get("size_on_disk"):
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected size_on_disk for the registry package"
+            )
+
+        expected_link_root = str(Path(lpm_home) / "global" / "links" / local_package)
+        if linked_row.get("commands") != [local_package]:
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected the linked package command list to contain linked-tool"
+            )
+        if linked_row.get("root") != expected_link_root:
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected the linked package root path to match the local-link install root"
+            )
+        if linked_row.get("linked_path") != expected_linked_path:
+            raise SmokeFailure(
+                "install/global-commands list verbose json: expected linked_path to point at the source checkout"
+            )
+
+        outdated_output = run_command(
+            "install/global-commands outdated text",
+            fixture,
+            [str(LPM_BIN), *registry_args, "global", "list", "--outdated"],
+            extra_env=registry_env,
+        )
+        require_contains(
+            outdated_output,
+            "Package",
+            "install/global-commands outdated text output",
+        )
+        require_contains(
+            outdated_output,
+            "Current",
+            "install/global-commands outdated text output",
+        )
+        require_contains(
+            outdated_output,
+            "Wanted",
+            "install/global-commands outdated text output",
+        )
+        require_contains(
+            outdated_output,
+            "Latest",
+            "install/global-commands outdated text output",
+        )
+        require_contains(
+            outdated_output,
+            "Bins",
+            "install/global-commands outdated text output",
+        )
+        require_contains(
+            outdated_output,
+            registry_package,
+            "install/global-commands outdated text output",
+        )
+        require_contains(
+            outdated_output,
+            "1.0.0",
+            "install/global-commands outdated text output",
+        )
+        require_contains(
+            outdated_output,
+            "1.5.0",
+            "install/global-commands outdated text output",
+        )
+        require_contains(
+            outdated_output,
+            "2.0.0",
+            "install/global-commands outdated text output",
+        )
+        require_contains(
+            outdated_output,
+            registry_bin,
+            "install/global-commands outdated text output",
+        )
+        require_not_contains(
+            outdated_output,
+            local_package,
+            "install/global-commands outdated text output",
+        )
+
+        outdated_json_result = run_command_result(
+            "install/global-commands outdated json",
+            fixture,
+            [str(LPM_BIN), *registry_args, "--json", "global", "list", "--outdated"],
+            extra_env=registry_env,
+        )
+        if outdated_json_result.returncode != 0:
+            raise SmokeFailure(
+                "install/global-commands outdated json failed with exit code "
+                f"{outdated_json_result.returncode}"
+            )
+        outdated_envelope = parse_json_stdout(
+            "install/global-commands outdated json",
+            outdated_json_result,
+        )
+        if outdated_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/global-commands outdated json: expected success=true"
+            )
+        if outdated_envelope.get("count_outdated") != 1:
+            raise SmokeFailure(
+                "install/global-commands outdated json: expected exactly one outdated registry-backed global"
+            )
+        outdated_rows = outdated_envelope.get("outdated", [])
+        if not isinstance(outdated_rows, list) or len(outdated_rows) != 1:
+            raise SmokeFailure(
+                "install/global-commands outdated json: expected a single outdated row"
+            )
+        outdated_row = outdated_rows[0]
+        if outdated_row.get("package") != registry_package or outdated_row.get("current") != "1.0.0":
+            raise SmokeFailure(
+                "install/global-commands outdated json: expected the outdated row to describe demo-cli@1.0.0"
+            )
+        if outdated_envelope.get("skipped_local_links") != [local_package]:
+            raise SmokeFailure(
+                "install/global-commands outdated json: expected skipped_local_links to list the linked checkout"
+            )
+
+        collision_package_dir = fixture / collision_package
+        write_package_json(
+            collision_package_dir / "package.json",
+            {
+                "name": collision_package,
+                "version": "1.0.0",
+                "bin": {registry_bin: "bin/demo"},
+            },
+        )
+        write_executable(
+            collision_package_dir / "bin" / "demo",
+            '#!/bin/sh\necho collision\n',
+        )
+        collision_output = run_command_expect_failure(
+            "install/global-commands link collision",
+            fixture,
+            [str(LPM_BIN), "global", "link", collision_package],
+            extra_env=registry_env,
+        )
+        require_contains(
+            collision_output,
+            registry_bin,
+            "install/global-commands link collision output",
+        )
+        require_contains(
+            collision_output,
+            registry_package,
+            "install/global-commands link collision output",
+        )
+
+        registry_unlink_output = run_command_expect_failure(
+            "install/global-commands unlink registry package",
+            fixture,
+            [str(LPM_BIN), "global", "unlink", registry_package],
+            extra_env=registry_env,
+        )
+        require_contains(
+            registry_unlink_output,
+            "global remove",
+            "install/global-commands unlink registry package output",
+        )
+        require_contains(
+            registry_unlink_output,
+            registry_package,
+            "install/global-commands unlink registry package output",
+        )
+
+        unlink_result = run_command_result(
+            "install/global-commands unlink local package json",
+            fixture,
+            [str(LPM_BIN), "--json", "global", "unlink", local_package],
+            extra_env=registry_env,
+        )
+        if unlink_result.returncode != 0:
+            raise SmokeFailure(
+                "install/global-commands unlink local package json failed with exit code "
+                f"{unlink_result.returncode}"
+            )
+        unlink_envelope = parse_json_stdout(
+            "install/global-commands unlink local package json",
+            unlink_result,
+        )
+        if unlink_envelope.get("package") != local_package:
+            raise SmokeFailure(
+                "install/global-commands unlink json: expected the unlinked package name in the envelope"
+            )
+        if unlink_envelope.get("commands") != [local_package]:
+            raise SmokeFailure(
+                "install/global-commands unlink json: expected the linked-tool command in the envelope"
+            )
+        require_not_exists(Path(lpm_home) / "global" / "links" / local_package)
+        require_not_exists(linked_shim)
+        require_exists(local_package_dir)
+
+        path_after_unlink = run_command_result(
+            "install/global-commands path after unlink",
+            fixture,
+            [str(LPM_BIN), "global", "path", local_package],
+            extra_env=registry_env,
+        )
+        if path_after_unlink.returncode == 0:
+            raise SmokeFailure(
+                "install/global-commands path after unlink: expected a non-zero exit for the removed local link"
+            )
+        require_contains(
+            path_after_unlink.stdout + path_after_unlink.stderr,
+            local_package,
+            "install/global-commands path after unlink output",
+        )
+
+        if (fixture / "package.json").read_text(encoding="utf-8") != baseline_package_json:
+            raise SmokeFailure(
+                "install/global-commands package.json: expected fixture package.json to stay unchanged"
+            )
+
+
 SCENARIOS = {
     "install-trust": (
         "Run lpm trust coverage for guarded approval refusal plus diff/prune behavior over direct manifest-and-snapshot drift.",
@@ -18208,6 +19461,10 @@ SCENARIOS = {
     "install-dev": (
         "Run lpm dev coverage for .env.example bootstrap, env-schema validation vs --no-env-check, explicit --env layering, hermetic HTTPS consent/bootstrap, tunnel inspector/no-inspect/strict inspect-port behavior, single-service arg forwarding, and multi-service dependsOn orchestration.",
         scenario_install_dev_command,
+    ),
+    "install-lpx": (
+        "Run the lpx executable alias through the dlx cache-hit and malformed-spec contracts.",
+        scenario_install_lpx_command,
     ),
     "install-dev-local-domains": (
         "Run local-domain lpm dev coverage for host-only auto-port routing, detached proxy auto-start, hosts-file mutation and refusal paths, duplicate-host cleanup, and the HTTPS-listener requirement.",
@@ -18333,6 +19590,10 @@ SCENARIOS = {
         "Run lpm audit coverage for default informational high behaviors, behavior fail-on, and secret-scan gating.",
         scenario_install_audit_command,
     ),
+    "install-audit-fix": (
+        "Run audit-fix coverage for canonical and alias invocation, dry-run vs apply, and custom-registry skip safety.",
+        scenario_install_audit_fix_command,
+    ),
     "install-query": (
         "Run lpm query coverage for selectors, assert-none gating, count mode, and Mermaid output on an LPM-managed project.",
         scenario_install_query_command,
@@ -18357,9 +19618,17 @@ SCENARIOS = {
         "Run outdated and upgrade dry-run coverage for internal-registry packages that must be skipped without registry leakage.",
         scenario_install_outdated_skipped_private,
     ),
+    "install-outdated-upgrade-configured-registry": (
+        "Run outdated and upgrade coverage for npm packages whose lockfile source points at the configured registry.",
+        scenario_install_outdated_upgrade_configured_registry,
+    ),
     "install-global-install": (
         "Run global install coverage for manifest writes, shims, collision hints, and alias success.",
         scenario_install_global_install,
+    ),
+    "install-global-commands": (
+        "Run lpm global coverage for local links, path/list surfaces, outdated reporting, collision refusal, and unlink cleanup.",
+        scenario_install_global_commands,
     ),
     "install-upgrade": (
         "Run npm upgrade coverage for public-npm lockfile sources through dry-run discovery and real upgrade application.",
@@ -18440,6 +19709,10 @@ SCENARIOS = {
     "install-config-aware": (
         "Drive the interactive config-aware lpm add flow against @lpm-registry/ex-source.",
         scenario_install_config_aware,
+    ),
+    "install-simple-source-delivery": (
+        "Run simple-path lpm add coverage for bare-import surfacing, JSON external_imports, repeat download behavior, and conflict prompts.",
+        scenario_install_simple_source_delivery,
     ),
     "install-remove": (
         "Run manifest-backed lpm add/remove coverage for a bare package installed into a custom path.",

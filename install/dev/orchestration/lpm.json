@@ -2,14 +2,14 @@
     "services": {
         "db": {
             "command": "node service-runner.cjs --service db --capture orchestration-events.jsonl --listen-delay-ms 250 --wait-ms 1200",
-            "port": 56429,
-            "readyPort": 56429,
+            "port": 52993,
+            "readyPort": 52993,
             "readyTimeout": 5
         },
         "api": {
             "command": "node service-runner.cjs --service api --capture orchestration-events.jsonl --require-url-env DB_URL --listen-delay-ms 250 --wait-ms 900",
-            "port": 56430,
-            "readyUrl": "http://127.0.0.1:56430/health",
+            "port": 52994,
+            "readyUrl": "http://127.0.0.1:52994/health",
             "readyTimeout": 5,
             "dependsOn": [
                 "db"
@@ -20,8 +20,8 @@
         },
         "web": {
             "command": "node service-runner.cjs --service web --capture orchestration-events.jsonl --require-url-env API_URL --wait-ms 600",
-            "port": 56431,
-            "readyPort": 56431,
+            "port": 52995,
+            "readyPort": 52995,
             "readyTimeout": 5,
             "dependsOn": [
                 "api"

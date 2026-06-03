@@ -3,6 +3,6 @@
     "private": true,
     "version": "0.0.0",
     "dependencies": {
-        "smoke-offline-lib": "http://127.0.0.1:56841/smoke-offline-lib-1.0.0.tgz#sha512-ap/ToFvpfcJQ0GtloVp5jHLsI5NkVGGP29cyigmpN9h25NmE14qre9En76aX4kFy/ZAf+a1M04J2QLbBJwj8nQ=="
+        "smoke-offline-lib": "http://127.0.0.1:53652/smoke-offline-lib-1.0.0.tgz#sha512-xgbYJ4S6mjoKGY17Z7g6UJhdO8D0Q9nCMdn2LkeSj4vfRfvZWtdolRaDHsNu1XzhGTFe5seY1kFGFufOZEHi/A=="
     }
 }

@@ -1,0 +1,7 @@
+{
+    "name": "linked-tool",
+    "version": "1.2.3",
+    "bin": {
+        "linked-tool": "bin/linked-tool"
+    }
+}

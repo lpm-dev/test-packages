@@ -9,7 +9,7 @@
     "patchedDependencies": {
       "@smoke/patch-lib@1.0.0": {
         "path": "patches/@smoke__patch-lib@1.0.0.patch",
-        "originalIntegrity": "sha512-PQnAaTJj8tEf3yTjbUKGDl6IISN3AvbW4OLHCdrP+cyCbRrTtGn3sO+ITR+A3OaHKeuWKF/qPRUx5HqAkz5FBA=="
+        "originalIntegrity": "sha512-tN/wMH1jzeilVS3NUNjcs6VBmyYXP90yP32XWdanFucIoIIVQbjxGIGzT3qCFo4Tfz7ZOXlw2SzfiVZ686p/zQ=="
       }
     }
   }

@@ -1,9 +1,8 @@
 {
-    "name": "audit-command-smoke",
+    "name": "audit-fix-skipped-smoke",
     "private": true,
     "version": "0.0.0",
     "dependencies": {
-        "audit-eval-pkg": "^1.0.0",
-        "audit-clean-pkg": "^1.0.0"
+        "vuln-pkg": "1.0.0"
     }
 }
