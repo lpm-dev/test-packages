@@ -1,0 +1,8 @@
+{
+    "name": "permissions-collision-readonly-node-modules",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-permissions-collision": "1.0.0"
+    }
+}

@@ -1,0 +1,8 @@
+{
+    "name": "corrupt-tarball-integrity-mismatch",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-corrupt-tarball": "latest"
+    }
+}

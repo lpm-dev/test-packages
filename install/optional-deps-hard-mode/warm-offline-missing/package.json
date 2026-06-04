@@ -1,0 +1,8 @@
+{
+    "name": "optional-deps-warm-offline-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "optional-offline-root": "^1.0.0"
+    }
+}

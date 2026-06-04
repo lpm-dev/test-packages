@@ -1,0 +1,8 @@
+{
+    "name": "lockfile-contract-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-lockfile-present": "1.0.0"
+    }
+}

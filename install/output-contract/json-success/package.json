@@ -1,0 +1,8 @@
+{
+  "name": "output-contract-json-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "output-contract-lib": "^1.0.0"
+  }
+}

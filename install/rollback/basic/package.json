@@ -1,0 +1,9 @@
+{
+    "name": "transaction-rollback-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-rollback-good": "1.0.0",
+        "smoke-rollback-bad": "1.0.0"
+    }
+}

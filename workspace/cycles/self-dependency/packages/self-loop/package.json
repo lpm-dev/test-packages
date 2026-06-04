@@ -1,0 +1,7 @@
+{
+    "name": "@smoke/self-loop",
+    "version": "1.0.0",
+    "dependencies": {
+        "@smoke/self-loop": "workspace:*"
+    }
+}

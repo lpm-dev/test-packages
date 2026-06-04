@@ -1,0 +1,8 @@
+{
+    "name": "adversarial-packument-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-adversarial-packument": "latest"
+    }
+}

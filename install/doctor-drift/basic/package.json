@@ -1,0 +1,9 @@
+{
+    "name": "doctor-drift-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "smoke-doctor-present": "1.0.0",
+        "smoke-doctor-missing": "1.0.0"
+    }
+}

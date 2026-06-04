@@ -1,0 +1,19 @@
+{
+    "name": "optional-deps-build-fail-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "required-anchor": "^1.0.0"
+    },
+    "optionalDependencies": {
+        "optional-build-fail": "^1.0.0"
+    },
+    "lpm": {
+        "trustedDependencies": {
+            "optional-build-fail@1.0.0": {
+                "integrity": "sha512-7QDWPISVbOya8E6i9nUKyO6KWaCzIwCd1TVFKRip7s6qUfmTIBrZVxOBOjNHC5Ty6GYdnGo7wmPzgCePrt9DXA==",
+                "scriptHash": "sha256-9b2077e85c58671a0a93ad6599716b76d70e42445711ed63a57b022c25c8df1a"
+            }
+        }
+    }
+}

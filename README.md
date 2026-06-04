@@ -47,6 +47,12 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/ports` — local fixture for direct `lpm ports` runs, covering declared-port listing, missing-port kill failures, live owner termination, and per-project `ports.toml` reset semantics
 - `install/cert` — local fixture for direct `lpm cert` runs, covering absent status, isolated trust-store install/uninstall, `generate --host` SAN refreshes, and the human-readable status blocks
 - `install/doctor` — local + mock-registry fixture for direct `lpm doctor` runs, covering fast-vs-all preset split, live `doctor list` filters, and fast `--fix` regeneration of `lpm.lockb` without dispatching extended-only fixes
+- `install/doctor-drift` — local + mock-registry fixture for `lpm doctor` deps-sync drift after a prior successful install, covering request-free fast detection, `--fix` install dispatch, and a clean rerun
+- `install/lockfile-contract` — mock-registry fixture set for healthy lockfile fast-path reuse, missing `lpm.lockb` regeneration without extra registry traffic, and missing `lpm.lock` fallback to a fresh resolve path
+- `install/adversarial-packument` — mock-registry fixture set for install fail-fast behavior on invalid packument JSON, missing dist tarball metadata, invalid `versions` shapes, and absent `versions` blocks without project writes
+- `install/corrupt-tarball` — mock-registry fixture set for install failures on truncated gzip bodies, gzip-wrapped non-tar payloads, and integrity mismatches without lockfile or manifest mutation
+- `install/rollback` — mock-registry fixture for transactional integrity-failure rollback and a clean rerun in the same fixture
+- `install/permissions-collision` — local + mock-registry fixture for write-denied project roots and occupied `lpm.lock` path collisions, including recovery after removing the collision
 - `install/health` — mock-registry fixture for direct `lpm health` runs, covering successful JSON output, the single `/api/registry/health` round trip, and unreachable-registry non-zero exits
 - `install/migrate/npm` — local fixture for `lpm migrate` from npm, covering `--dry-run` no-write behavior, lockfile/`.npmrc` backup creation, and `--rollback` cleanup back to the original foreign-lockfile state
 - `install/migrate/pnpm` — local fixture for `lpm migrate` from pnpm, covering `pnpm.overrides` translation into `lpm.overrides`, preserved `pnpm.overrides`, manifest backups, and `--no-install --no-npmrc` no-side-effect behavior
@@ -56,6 +62,7 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/upgrade` — mock-registry fixture for `lpm upgrade` on public-npm and configured-registry lockfile sources, covering dry-run candidate discovery and real end-to-end upgrade application
 - `install/outdated` — mock-registry fixture for `lpm outdated` across `dependencies` and `devDependencies`, including resolved `wanted` vs `latest` semantics, configured-registry npm inclusion, and the shared skipped-private no-leak path with `lpm upgrade --dry-run`
 - `install/uninstall` — local uninstall fixture for dependency/devDependency removal, lockfile-pair cleanup, and untouched peer/optional/trusted dependency state
+- `install/uninstall-bin-cleanup` — mock-registry fixture for scoped package uninstall cleanup, covering owned local `.bin` shim removal while preserving unrelated shims
 - `install/create-project-smoke` — migrated single-project fixture for project bootstrap flows
 - `install/e2e-sandbox` — migrated single-project fixture for env/sandbox-related end-to-end checks
 - `install/test-upstream-proxy` — migrated single-project fixture for mixed upstream-registry dependency coverage
@@ -64,7 +71,10 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/peer-deps` — mock-registry fixture set for optional-peer suppression, strict missing-peer failures, structured `peer_issues`, and peer-conflict auto-isolation
 - `install/catalog` — mock-registry fixture set for manual/prefer/strict catalog save policy, `--catalog` forcing, package.json cleanup pruning, and `pnpm-workspace.yaml` catalog ingestion
 - `install/save-policy` — mock-registry fixture set for save-prefix, explicit range, latest-tag, prerelease, wildcard, and re-install coverage
-- `install/script-policy` — mock-registry fixture set for default deny plus guarded `lpm.scriptPolicy = "allow"` and `"triage"` manifest proposal coverage
+- `install/optional-deps-hard-mode` — mock-registry fixture set for transitive optional dependency trust previews, platform-gated skips, missing optional fetch skips, and optional-plus-peer interactions, plus an explicit trust-unlock path for optional script execution
+- `install/scoped-matrix` — mock-registry fixture set for scoped package bare installs, beta dist-tag resolution, local bin wiring, scoped uninstall manifest cleanup, and scoped upgrade application
+- `install/output-contract` — mock-registry fixture set for human-vs-JSON stdout behavior, stable JSON failure envelopes, and approval-required output contracts
+- `install/script-policy` — mock-registry fixture set for default deny, guarded `lpm.scriptPolicy = "allow"` and `"triage"` proposals, explicit `scripts-allow` unlock execution, lifecycle ordering, targeted rebuild, and the current auto-build failure surface
 - `install/offline-integrity` — tarball-URL fixture set for `--strict-integrity`, warm-store offline relink, and cold offline failure coverage
 - `install/minimum-release-age` — mock-registry fixture set for recent-publish cooldown defaults, guarded CLI/package weakeners, and explicit pinned-spec blocking
 - `install/security` — local + mock-registry fixture set for `lpm security status`, guarded `lpm config` writes, guarded repo proposals, default-target `unlock` / `lock` coverage, signed audit-log coverage, and the optional native unlock + project lock success path
@@ -81,5 +91,8 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `workspace/basic` — minimal workspace fixture with one local package and one app consuming it
 - `workspace/complex` — larger workspace fixture with multiple apps, shared packages, and transitive workspace links
 - `workspace/nested-boundary` — workspace fixture with a nested non-workspace child package for boundary regressions
+- `workspace/cycles` — generated workspace fixture set for pure workspace cycles plus the current default-path external registry re-entry linker failure without registry leakage
+- `workspace/rollback` — generated workspace fixture for workspace self-dependency early-abort coverage, asserting the install fails before writing member lockfiles or self-links
+- `workspace/multi-member-prompt` — generated workspace fixture for multi-member filtered install coverage, covering streamed `--json` envelopes and the interactive decline-before-write path
 - `workspace/targeting` — workspace fixture for `--filter`, `--filter-prod`, `--no-bail`, `--workspace-concurrency`, `--changed-files-ignore-pattern`, `--test-pattern`, `pkg{path}`, `-w`, multi-member writes, uninstall targeting, and `--fail-if-no-match`
 - `workspace/pack` — workspace fixture for `lpm pack --all`, root-level tsdown bin reuse, workspace JSON envelopes, and multi-member watch rejection

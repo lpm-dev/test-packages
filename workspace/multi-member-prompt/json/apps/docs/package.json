@@ -1,0 +1,9 @@
+{
+  "name": "@smoke/target-docs",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "@smoke/target-core": "workspace:*",
+    "smoke-workspace-json": "1.0.0"
+  }
+}

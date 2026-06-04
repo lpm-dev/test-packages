@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import base64
 from contextlib import contextmanager
+import gzip
 import hashlib
 import io
 import json
@@ -177,6 +178,16 @@ SAVE_POLICY_EXISTING_RANGE_BASELINE_PACKAGE_JSON = """{
     \"version\": \"0.0.0\",
     \"dependencies\": {
         \"smoke-save-lib\": \"~1.2.3\"
+    }
+}
+"""
+
+ADVERSARIAL_PACKUMENT_BASELINE_PACKAGE_JSON = """{
+    \"name\": \"adversarial-packument-smoke\",
+    \"private\": true,
+    \"version\": \"0.0.0\",
+    \"dependencies\": {
+        \"smoke-adversarial-packument\": \"latest\"
     }
 }
 """
@@ -2082,6 +2093,14 @@ def reset_peer_deps_fixture(name: str, package_json: str) -> Path:
     )
 
 
+def reset_optional_deps_fixture(name: str) -> Path:
+    fixture = ROOT / "install" / "optional-deps-hard-mode" / name
+    return reset_single_project_fixture(
+        fixture,
+        extra_delete=[".npmrc", "optional-build-fail-ran.txt"],
+    )
+
+
 def reset_catalog_fixture(
     name: str,
     package_json: str,
@@ -2466,6 +2485,118 @@ def reset_save_policy_fixture(name: str, package_json: str) -> Path:
     )
 
 
+def reset_adversarial_packument_fixture(name: str) -> Path:
+    fixture = ROOT / "install" / "adversarial-packument" / name
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={"package.json": ADVERSARIAL_PACKUMENT_BASELINE_PACKAGE_JSON},
+        extra_delete=[".npmrc"],
+    )
+
+
+def reset_corrupt_tarball_fixture(name: str, dependency_name: str) -> Path:
+    fixture = ROOT / "install" / "corrupt-tarball" / name
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={
+            "package.json": json.dumps(
+                {
+                    "name": f"corrupt-tarball-{name}",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {dependency_name: "latest"},
+                },
+                indent=4,
+            )
+            + "\n"
+        },
+        extra_delete=[".npmrc"],
+    )
+
+
+def reset_transaction_rollback_fixture(good_name: str, bad_name: str) -> Path:
+    fixture = ROOT / "install" / "rollback" / "basic"
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={
+            "package.json": json.dumps(
+                {
+                    "name": "transaction-rollback-smoke",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {
+                        good_name: "1.0.0",
+                        bad_name: "1.0.0",
+                    },
+                },
+                indent=4,
+            )
+            + "\n"
+        },
+        extra_delete=[".npmrc"],
+    )
+
+
+def reset_permissions_collision_fixture(name: str, dependency_name: str) -> Path:
+    fixture = ROOT / "install" / "permissions-collision" / name
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={
+            "package.json": json.dumps(
+                {
+                    "name": f"permissions-collision-{name}",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {dependency_name: "1.0.0"},
+                },
+                indent=4,
+            )
+            + "\n"
+        },
+        extra_delete=[".npmrc"],
+    )
+
+
+def reset_doctor_drift_fixture(present_package: str) -> Path:
+    fixture = ROOT / "install" / "doctor-drift" / "basic"
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={
+            "package.json": json.dumps(
+                {
+                    "name": "doctor-drift-smoke",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {present_package: "1.0.0"},
+                },
+                indent=4,
+            )
+            + "\n"
+        },
+        extra_delete=[".npmrc", ".gitattributes", ".gitignore"],
+    )
+
+
+def reset_lockfile_contract_fixture(name: str, present_package: str) -> Path:
+    fixture = ROOT / "install" / "lockfile-contract" / name
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={
+            "package.json": json.dumps(
+                {
+                    "name": "lockfile-contract-smoke",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {present_package: "1.0.0"},
+                },
+                indent=4,
+            )
+            + "\n"
+        },
+        extra_delete=[".npmrc", ".gitattributes", ".gitignore"],
+    )
+
+
 def reset_script_policy_fixture(name: str, dependency_name: str) -> Path:
     fixture = ROOT / "install" / "script-policy" / name
     return reset_single_project_fixture(
@@ -2477,6 +2608,68 @@ def reset_script_policy_fixture(name: str, dependency_name: str) -> Path:
                     "private": True,
                     "version": "0.0.0",
                     "dependencies": {dependency_name: "^1.0.0"},
+                },
+                indent=4,
+            )
+            + "\n"
+        },
+        extra_delete=[".npmrc"],
+    )
+
+
+def reset_workspace_rollback_fixture() -> Path:
+    fixture = ROOT / "workspace" / "rollback" / "basic"
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={
+            "package.json": json.dumps(
+                {
+                    "name": "workspace-rollback-root",
+                    "private": True,
+                    "version": "1.0.0",
+                    "workspaces": ["packages/*"],
+                },
+                indent=4,
+            )
+            + "\n",
+            "packages/self-loop/package.json": json.dumps(
+                {
+                    "name": "@smoke/self-loop",
+                    "version": "1.0.0",
+                    "dependencies": {"@smoke/self-loop": "workspace:*"},
+                },
+                indent=4,
+            )
+            + "\n",
+        },
+    )
+
+
+def reset_workspace_prompt_fixture(name: str) -> Path:
+    fixture = ROOT / "workspace" / "multi-member-prompt" / name
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={
+            "package.json": WORKSPACE_TARGETING_ROOT_BASELINE_PACKAGE_JSON,
+            "apps/web/package.json": WORKSPACE_TARGETING_WEB_BASELINE_PACKAGE_JSON,
+            "apps/docs/package.json": WORKSPACE_TARGETING_DOCS_BASELINE_PACKAGE_JSON,
+            "packages/core/package.json": WORKSPACE_TARGETING_CORE_BASELINE_PACKAGE_JSON,
+        },
+        extra_delete=[".npmrc"],
+    )
+
+
+def reset_uninstall_bin_cleanup_fixture() -> Path:
+    fixture = ROOT / "install" / "uninstall-bin-cleanup" / "basic"
+    return reset_single_project_fixture(
+        fixture,
+        baseline_files={
+            "package.json": json.dumps(
+                {
+                    "name": "uninstall-bin-cleanup-smoke",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {"@smoke/scoped-cli": "1.0.0"},
                 },
                 indent=4,
             )
@@ -2885,6 +3078,29 @@ def reset_uninstall_fixture() -> Path:
     )
 
 
+def reset_scoped_install_fixture(name: str) -> Path:
+    fixture = ROOT / "install" / "scoped-matrix" / name
+    return reset_single_project_fixture(
+        fixture,
+        extra_delete=[".npmrc"],
+    )
+
+
+def reset_output_contract_fixture(name: str) -> Path:
+    fixture = ROOT / "install" / "output-contract" / name
+    return reset_single_project_fixture(
+        fixture,
+        extra_delete=[".npmrc"],
+    )
+
+
+def reset_workspace_cycles_fixture(name: str) -> Path:
+    fixture = ROOT / "workspace" / "cycles" / name
+    delete_path(fixture)
+    fixture.mkdir(parents=True, exist_ok=True)
+    return fixture
+
+
 def reset_source_delivery_fixture() -> Path:
     fixture = ROOT / "install" / "source-delivery"
     return reset_single_project_fixture(
@@ -3234,14 +3450,14 @@ def run_command_expect_failure(
     return combined
 
 
-def run_interactive_command(
+def run_interactive_command_result(
     label: str,
     cwd: Path,
     args: list[str],
     prompts: list[tuple[str, str]],
     extra_env: dict[str, str] | None = None,
     timeout_seconds: int = 600,
-) -> str:
+) -> tuple[str, int]:
     log(f"{label}: {' '.join(args)}")
     env = merged_env(extra_env)
     pid, fd = pty.fork()
@@ -3288,9 +3504,28 @@ def run_interactive_command(
             else:
                 exit_code = 1
 
-            if exit_code != 0:
-                raise SmokeFailure(f"{label} failed with exit code {exit_code}")
-            return transcript
+            return transcript, exit_code
+
+
+def run_interactive_command(
+    label: str,
+    cwd: Path,
+    args: list[str],
+    prompts: list[tuple[str, str]],
+    extra_env: dict[str, str] | None = None,
+    timeout_seconds: int = 600,
+) -> str:
+    transcript, exit_code = run_interactive_command_result(
+        label,
+        cwd,
+        args,
+        prompts,
+        extra_env=extra_env,
+        timeout_seconds=timeout_seconds,
+    )
+    if exit_code != 0:
+        raise SmokeFailure(f"{label} failed with exit code {exit_code}")
+    return transcript
 
 
 def parse_json_stdout(label: str, result: subprocess.CompletedProcess[str]) -> dict[str, object]:
@@ -3304,6 +3539,36 @@ def parse_json_stdout(label: str, result: subprocess.CompletedProcess[str]) -> d
     if not isinstance(payload, dict):
         raise SmokeFailure(f"{label}: expected top-level JSON object")
     return payload
+
+
+def parse_json_stdout_stream(
+    label: str,
+    result: subprocess.CompletedProcess[str],
+) -> list[dict[str, object]]:
+    decoder = json.JSONDecoder()
+    payloads: list[dict[str, object]] = []
+    raw = result.stdout
+    index = 0
+
+    while index < len(raw):
+        while index < len(raw) and raw[index].isspace():
+            index += 1
+        if index >= len(raw):
+            break
+        try:
+            payload, next_index = decoder.raw_decode(raw, index)
+        except json.JSONDecodeError as error:
+            raise SmokeFailure(
+                f"{label}: expected a JSON object stream on stdout, got {result.stdout!r}"
+            ) from error
+        if not isinstance(payload, dict):
+            raise SmokeFailure(f"{label}: expected each JSON payload to be an object")
+        payloads.append(payload)
+        index = next_index
+
+    if not payloads:
+        raise SmokeFailure(f"{label}: expected at least one JSON payload on stdout")
+    return payloads
 
 
 def require_success_payload(
@@ -3485,6 +3750,244 @@ def scenario_workspace_nested_boundary() -> None:
         "nested boundary workspace: [boundary-accent] studio",
         "workspace/nested-boundary node run",
     )
+
+
+def scenario_workspace_cycles() -> None:
+    registry_packages = [
+        {
+            "name": "external-reentry",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {"@smoke/cycle-b": "1.0.0"}},
+                    "package_json_extra": {
+                        "license": "MIT",
+                        "dependencies": {"@smoke/cycle-b": "1.0.0"},
+                    },
+                    "files": {
+                        "index.js": "module.exports = require('@smoke/cycle-b').name\n",
+                    },
+                }
+            },
+        }
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        scenario_env = smoke_home_env(home_root)
+
+        graph_fixture = reset_workspace_cycles_fixture("cycle-success")
+        write_package_json(
+            graph_fixture / "package.json",
+            {
+                "name": "workspace-cycles-root",
+                "private": True,
+                "version": "1.0.0",
+                "workspaces": ["apps/*", "packages/*"],
+            },
+        )
+        write_package_json(
+            graph_fixture / "apps" / "app" / "package.json",
+            {
+                "name": "workspace-cycle-app",
+                "private": True,
+                "version": "1.0.0",
+                "dependencies": {"@smoke/cycle-a": "workspace:*"},
+            },
+        )
+        (graph_fixture / "apps" / "app" / "index.js").write_text(
+            "const cycleA = require('@smoke/cycle-a')\n"
+            "console.log(`${cycleA.name}:${cycleA.peer}`)\n",
+            encoding="utf-8",
+        )
+        write_package_json(
+            graph_fixture / "packages" / "cycle-a" / "package.json",
+            {
+                "name": "@smoke/cycle-a",
+                "version": "1.0.0",
+                "main": "index.js",
+                "dependencies": {"@smoke/cycle-b": "workspace:*"},
+            },
+        )
+        (graph_fixture / "packages" / "cycle-a" / "index.js").write_text(
+            "exports.name = 'cycle-a'\n"
+            "exports.peer = require('@smoke/cycle-b').name\n",
+            encoding="utf-8",
+        )
+        write_package_json(
+            graph_fixture / "packages" / "cycle-b" / "package.json",
+            {
+                "name": "@smoke/cycle-b",
+                "version": "1.0.0",
+                "main": "index.js",
+                "dependencies": {"@smoke/cycle-a": "workspace:*"},
+            },
+        )
+        (graph_fixture / "packages" / "cycle-b" / "index.js").write_text(
+            "exports.name = 'cycle-b'\n"
+            "exports.peer = require('@smoke/cycle-a').name\n",
+            encoding="utf-8",
+        )
+
+        graph_result = run_command_result(
+            "workspace/cycles pure cycle install",
+            graph_fixture / "apps" / "app",
+            [str(LPM_BIN), "install"],
+            extra_env=scenario_env,
+        )
+        if graph_result.returncode != 0:
+            raise SmokeFailure(
+                "workspace/cycles pure cycle install failed with exit code "
+                f"{graph_result.returncode}"
+            )
+        cycle_b_link = graph_fixture / "apps" / "app" / "node_modules" / "@smoke" / "cycle-b"
+        require_exists(cycle_b_link)
+        if not cycle_b_link.is_symlink():
+            raise SmokeFailure(
+                "workspace/cycles pure cycle install: expected @smoke/cycle-b to be linked as a workspace symlink"
+            )
+        if cycle_b_link.resolve() != (graph_fixture / "packages" / "cycle-b").resolve():
+            raise SmokeFailure(
+                "workspace/cycles pure cycle install: expected @smoke/cycle-b to resolve to the workspace member"
+            )
+        runtime_output = run_command(
+            "workspace/cycles pure cycle runtime",
+            graph_fixture / "apps" / "app",
+            ["node", "index.js"],
+        )
+        require_contains(
+            runtime_output,
+            "cycle-a:cycle-b",
+            "workspace/cycles pure cycle runtime output",
+        )
+        requests_before_reentry = list(registry.requested_paths())
+        leaked_workspace_paths = [
+            path
+            for path in requests_before_reentry
+            if "cycle-a" in path or "cycle-b" in path
+        ]
+        if leaked_workspace_paths:
+            raise SmokeFailure(
+                "workspace/cycles pure cycle install: expected workspace members to stay off the registry path, got "
+                f"{leaked_workspace_paths}"
+            )
+
+        reentry_fixture = reset_workspace_cycles_fixture("external-reentry")
+        write_registry_npmrc(reentry_fixture, registry.registry_url)
+        write_package_json(
+            reentry_fixture / "package.json",
+            {
+                "name": "workspace-reentry-root",
+                "private": True,
+                "version": "1.0.0",
+                "workspaces": ["apps/*", "packages/*"],
+            },
+        )
+        write_package_json(
+            reentry_fixture / "apps" / "app" / "package.json",
+            {
+                "name": "workspace-reentry-app",
+                "private": True,
+                "version": "1.0.0",
+                "dependencies": {
+                    "@smoke/cycle-a": "workspace:*",
+                    "external-reentry": "1.0.0",
+                },
+            },
+        )
+        write_package_json(
+            reentry_fixture / "packages" / "cycle-a" / "package.json",
+            {
+                "name": "@smoke/cycle-a",
+                "version": "1.0.0",
+                "main": "index.js",
+                "dependencies": {"@smoke/cycle-b": "workspace:*"},
+            },
+        )
+        (reentry_fixture / "packages" / "cycle-a" / "index.js").write_text(
+            "exports.name = 'cycle-a'\n"
+            "exports.peer = require('@smoke/cycle-b').name\n",
+            encoding="utf-8",
+        )
+        write_package_json(
+            reentry_fixture / "packages" / "cycle-b" / "package.json",
+            {
+                "name": "@smoke/cycle-b",
+                "version": "1.0.0",
+                "main": "index.js",
+                "dependencies": {"@smoke/cycle-a": "workspace:*"},
+            },
+        )
+        (reentry_fixture / "packages" / "cycle-b" / "index.js").write_text(
+            "exports.name = 'cycle-b'\n"
+            "exports.peer = require('@smoke/cycle-a').name\n",
+            encoding="utf-8",
+        )
+
+        reentry_result = run_command_result(
+            "workspace/cycles external re-entry install",
+            reentry_fixture / "apps" / "app",
+            [str(LPM_BIN), "install"],
+            extra_env=scenario_env,
+        )
+        if reentry_result.returncode == 0:
+            raise SmokeFailure(
+                "workspace/cycles external re-entry install: expected non-zero exit code"
+            )
+        require_contains(
+            reentry_result.stdout + reentry_result.stderr,
+            "@smoke/cycle-b",
+            "workspace/cycles external re-entry failure output",
+        )
+        require_contains(
+            reentry_result.stdout + reentry_result.stderr,
+            "resolved graph key",
+            "workspace/cycles external re-entry failure output",
+        )
+        reentry_paths = registry.requested_paths()[len(requests_before_reentry) :]
+        if any("cycle-b" in path for path in reentry_paths):
+            raise SmokeFailure(
+                "workspace/cycles external re-entry install: expected the resolver cache fix to keep @smoke/cycle-b off the registry path even though the default-path linker still fails later"
+            )
+
+
+def scenario_workspace_rollback() -> None:
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
+        fixture = reset_workspace_rollback_fixture()
+        member_dir = fixture / "packages" / "self-loop"
+        baseline_manifest = (member_dir / "package.json").read_bytes()
+
+        result = run_command_result(
+            "workspace/rollback self dependency failure",
+            member_dir,
+            [
+                str(LPM_BIN),
+                "install",
+                "--no-skills",
+                "--no-editor-setup",
+                "--no-security-summary",
+            ],
+            extra_env=smoke_home_env(home_root),
+        )
+        if result.returncode == 0:
+            raise SmokeFailure(
+                "workspace/rollback self dependency failure: expected non-zero exit code"
+            )
+
+        combined_output = result.stdout + result.stderr
+        if "depends on itself" not in combined_output and "self-dependency" not in combined_output:
+            raise SmokeFailure(
+                "workspace/rollback self dependency failure: expected a self-dependency error message"
+            )
+        if (member_dir / "package.json").read_bytes() != baseline_manifest:
+            raise SmokeFailure(
+                "workspace/rollback self dependency failure: expected member package.json to stay unchanged"
+            )
+
+        require_not_exists(member_dir / "node_modules" / "@smoke" / "self-loop")
+        require_not_exists(member_dir / "lpm.lock")
+        require_not_exists(member_dir / "lpm.lockb")
 
 
 def scenario_install_config_aware() -> None:
@@ -3961,6 +4464,168 @@ def scenario_workspace_targeting() -> None:
         reset_workspace_targeting_fixture()
 
 
+def scenario_workspace_json() -> None:
+    package_name = "smoke-workspace-json"
+    version = "1.0.0"
+    package_spec = f"{package_name}@{version}"
+    registry_packages = [
+        {
+            "name": package_name,
+            "dist_tags": {"latest": version},
+            "versions": {
+                version: {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"license": "MIT"},
+                    "files": {
+                        "index.js": "module.exports = 'workspace-json'\n",
+                    },
+                }
+            },
+        }
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        fixture = reset_workspace_prompt_fixture("json")
+        scenario_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
+        result = run_command_result(
+            "workspace/json multi-member install",
+            fixture,
+            [
+                str(LPM_BIN),
+                "--registry",
+                registry.registry_url,
+                "--insecure",
+                "--json",
+                "install",
+                package_spec,
+                "--filter",
+                "./apps/*",
+                "--no-skills",
+                "--no-editor-setup",
+                "--no-security-summary",
+            ],
+            extra_env=scenario_env,
+        )
+        if result.returncode != 0:
+            raise SmokeFailure(
+                f"workspace/json multi-member install failed with exit code {result.returncode}"
+            )
+
+        envelopes = parse_json_stdout_stream("workspace/json multi-member install", result)
+        if len(envelopes) != 2:
+            raise SmokeFailure(
+                "workspace/json multi-member install: expected one JSON envelope per targeted member"
+            )
+        if any(envelope.get("success") is not True for envelope in envelopes):
+            raise SmokeFailure(
+                "workspace/json multi-member install: expected success=true for each targeted member"
+            )
+        if "Proceed with" in result.stderr:
+            raise SmokeFailure(
+                "workspace/json multi-member install: expected JSON mode to suppress the confirmation prompt"
+            )
+
+        for member in ["web", "docs"]:
+            require_contains(
+                (fixture / "apps" / member / "package.json").read_text(encoding="utf-8"),
+                f'"{package_name}": "{version}"',
+                f"workspace/json {member} package.json",
+            )
+        require_not_contains(
+            (fixture / "packages" / "core" / "package.json").read_text(encoding="utf-8"),
+            f'"{package_name}"',
+            "workspace/json core package.json",
+        )
+
+
+def scenario_workspace_interactive_cancel() -> None:
+    package_name = "smoke-workspace-cancel"
+    version = "1.0.0"
+    package_spec = f"{package_name}@{version}"
+    registry_packages = [
+        {
+            "name": package_name,
+            "dist_tags": {"latest": version},
+            "versions": {
+                version: {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"license": "MIT"},
+                    "files": {
+                        "index.js": "module.exports = 'workspace-cancel'\n",
+                    },
+                }
+            },
+        }
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        fixture = reset_workspace_prompt_fixture("interactive-cancel")
+        scenario_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
+        manifests_before = {
+            "web": (fixture / "apps" / "web" / "package.json").read_bytes(),
+            "docs": (fixture / "apps" / "docs" / "package.json").read_bytes(),
+            "core": (fixture / "packages" / "core" / "package.json").read_bytes(),
+        }
+        prompt = "Proceed with adding 1 package(s) across 2 members? [y/N]"
+        transcript, exit_code = run_interactive_command_result(
+            "workspace/interactive cancel multi-member install",
+            fixture,
+            [
+                str(LPM_BIN),
+                "--registry",
+                registry.registry_url,
+                "--insecure",
+                "install",
+                package_spec,
+                "--filter",
+                "./apps/*",
+                "--no-skills",
+                "--no-editor-setup",
+                "--no-security-summary",
+            ],
+            [(prompt, "n\n")],
+            extra_env=scenario_env,
+        )
+        if exit_code == 0:
+            raise SmokeFailure(
+                "workspace/interactive cancel multi-member install: expected non-zero exit after declining the prompt"
+            )
+
+        require_contains(
+            transcript,
+            prompt,
+            "workspace/interactive cancel prompt transcript",
+        )
+        require_contains(
+            transcript,
+            "aborted by user",
+            "workspace/interactive cancel transcript",
+        )
+        require_contains(
+            transcript,
+            "no package.json was modified",
+            "workspace/interactive cancel transcript",
+        )
+
+        for member, before in manifests_before.items():
+            manifest_path = (
+                fixture / "packages" / "core" / "package.json"
+                if member == "core"
+                else fixture / "apps" / member / "package.json"
+            )
+            if manifest_path.read_bytes() != before:
+                raise SmokeFailure(
+                    f"workspace/interactive cancel {member} package.json: expected no manifest mutation after abort"
+                )
+
+        require_not_exists(fixture / "apps" / "web" / "node_modules" / package_name)
+        require_not_exists(fixture / "apps" / "docs" / "node_modules" / package_name)
+
+
 def scenario_workspace_filter_controls() -> None:
     try:
         filter_prod_fixture = reset_workspace_targeting_fixture()
@@ -4180,6 +4845,106 @@ def scenario_install_uninstall() -> None:
     require_exists(fixture / "lpm.lockb")
 
 
+def scenario_install_uninstall_local_bin_cleanup() -> None:
+    package_name = "@smoke/scoped-cli"
+    version = "1.0.0"
+    registry_packages = [
+        {
+            "name": package_name,
+            "dist_tags": {"latest": version},
+            "versions": {
+                version: {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "bin": {"scoped-smoke": "cli.js"},
+                    },
+                    "package_json_extra": {
+                        "bin": {"scoped-smoke": "cli.js"},
+                    },
+                    "files": {
+                        "cli.js": "#!/usr/bin/env node\nconsole.log('scoped-smoke')\n",
+                    },
+                }
+            },
+        }
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        fixture = reset_uninstall_bin_cleanup_fixture()
+        command_prefix = [
+            str(LPM_BIN),
+            "--registry",
+            registry.registry_url,
+            "--insecure",
+        ]
+        install_flags = [
+            "install",
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+        scenario_env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
+
+        run_command(
+            "install/uninstall local bin cleanup install scoped cli",
+            fixture,
+            [*command_prefix, *install_flags],
+            extra_env=scenario_env,
+        )
+
+        shim_path = fixture / "node_modules" / ".bin" / "scoped-smoke"
+        require_exists(shim_path)
+
+        seed_node_modules_package(
+            fixture,
+            "smoke-keep-cli",
+            "1.0.0",
+            {"keep.js": "#!/usr/bin/env node\nconsole.log('keep')\n"},
+            package_json_extra={"bin": {"keep-cli": "keep.js"}},
+        )
+        keep_shim_path = fixture / "node_modules" / ".bin" / "keep-cli"
+        keep_shim_path.parent.mkdir(parents=True, exist_ok=True)
+        delete_path(keep_shim_path)
+        keep_shim_path.symlink_to(Path("../smoke-keep-cli/keep.js"))
+
+        uninstall_result = run_command_result(
+            "install/uninstall local bin cleanup uninstall scoped cli",
+            fixture,
+            [*command_prefix, "uninstall", package_name, "--json"],
+            extra_env=scenario_env,
+        )
+        if uninstall_result.returncode != 0:
+            raise SmokeFailure(
+                "install/uninstall local bin cleanup uninstall scoped cli failed with exit code "
+                f"{uninstall_result.returncode}"
+            )
+
+        envelope = parse_json_stdout(
+            "install/uninstall local bin cleanup uninstall scoped cli",
+            uninstall_result,
+        )
+        if envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/uninstall local bin cleanup uninstall scoped cli: expected success=true"
+            )
+        if package_name not in (envelope.get("removed") or []):
+            raise SmokeFailure(
+                "install/uninstall local bin cleanup uninstall scoped cli: expected removed[] to include @smoke/scoped-cli"
+            )
+
+        manifest = read_json_file(fixture / "package.json")
+        if package_name in manifest.get("dependencies", {}):
+            raise SmokeFailure(
+                "install/uninstall local bin cleanup package.json: expected @smoke/scoped-cli to be removed from dependencies"
+            )
+
+        require_not_exists(fixture / "node_modules" / "@smoke" / "scoped-cli")
+        require_not_exists(shim_path)
+        require_exists(keep_shim_path)
+
+
 def scenario_install_upgrade() -> None:
     package_name = "smoke-upgrade-lib"
     registry_packages = [
@@ -4265,6 +5030,456 @@ def scenario_install_upgrade() -> None:
             'version = "1.4.0"',
             "install/upgrade lpm.lock",
         )
+
+
+def scenario_install_scoped_matrix() -> None:
+    scoped_lib = "@smoke/scoped-lib"
+    scoped_cli = "@smoke/scoped-cli"
+    cli_bin = "scoped-smoke"
+    registry_packages = [
+        {
+            "name": scoped_lib,
+            "dist_tags": {"latest": "1.2.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"license": "MIT"},
+                    "files": {
+                        "index.js": "module.exports = 'scoped-lib@1.0.0'\n",
+                    },
+                },
+                "1.2.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"license": "MIT"},
+                    "files": {
+                        "index.js": "module.exports = 'scoped-lib@1.2.0'\n",
+                    },
+                },
+            },
+        },
+        {
+            "name": scoped_cli,
+            "dist_tags": {"latest": "1.1.0", "beta": "2.0.0-beta.1"},
+            "versions": {
+                "1.1.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "bin": {cli_bin: "bin/cli.js"},
+                    },
+                    "package_json_extra": {
+                        "license": "MIT",
+                        "bin": {cli_bin: "bin/cli.js"},
+                    },
+                    "files": {
+                        "bin/cli.js": "#!/usr/bin/env node\nprocess.stdout.write('scoped-cli@1.1.0\\n')\n",
+                    },
+                },
+                "2.0.0-beta.1": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "bin": {cli_bin: "bin/cli.js"},
+                    },
+                    "package_json_extra": {
+                        "license": "MIT",
+                        "bin": {cli_bin: "bin/cli.js"},
+                    },
+                    "files": {
+                        "bin/cli.js": "#!/usr/bin/env node\nprocess.stdout.write('scoped-cli@2.0.0-beta.1\\n')\n",
+                    },
+                },
+            },
+        },
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        scenario_env = smoke_home_env(home_root)
+        install_flags = [
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+        registry_args = ["--registry", registry.registry_url, "--insecure"]
+
+        basic_fixture = reset_scoped_install_fixture("basic")
+        write_registry_npmrc(basic_fixture, registry.registry_url)
+        write_package_json(
+            basic_fixture / "package.json",
+            {
+                "name": "scoped-install-basic-smoke",
+                "private": True,
+                "version": "0.0.0",
+            },
+        )
+        run_command(
+            "install/scoped-matrix bare install",
+            basic_fixture,
+            [str(LPM_BIN), "install", scoped_lib, *install_flags],
+            extra_env=scenario_env,
+        )
+        if read_dependency_spec(basic_fixture / "package.json", scoped_lib) != "^1.2.0":
+            raise SmokeFailure(
+                "install/scoped-matrix bare install: expected scoped bare install to save as ^1.2.0"
+            )
+        if read_installed_package_version(basic_fixture, scoped_lib) != "1.2.0":
+            raise SmokeFailure(
+                "install/scoped-matrix bare install: expected @smoke/scoped-lib 1.2.0 to be installed"
+            )
+
+        dist_tag_fixture = reset_scoped_install_fixture("dist-tag-cli")
+        write_registry_npmrc(dist_tag_fixture, registry.registry_url)
+        write_package_json(
+            dist_tag_fixture / "package.json",
+            {
+                "name": "scoped-install-dist-tag-smoke",
+                "private": True,
+                "version": "0.0.0",
+            },
+        )
+        run_command(
+            "install/scoped-matrix beta dist-tag install",
+            dist_tag_fixture,
+            [str(LPM_BIN), "install", f"{scoped_cli}@beta", *install_flags],
+            extra_env=scenario_env,
+        )
+        if read_dependency_spec(dist_tag_fixture / "package.json", scoped_cli) != "2.0.0-beta.1":
+            raise SmokeFailure(
+                "install/scoped-matrix beta dist-tag install: expected prerelease dist-tag to save exact"
+            )
+        if read_installed_package_version(dist_tag_fixture, scoped_cli) != "2.0.0-beta.1":
+            raise SmokeFailure(
+                "install/scoped-matrix beta dist-tag install: expected scoped prerelease target to be installed"
+            )
+        bin_path = dist_tag_fixture / "node_modules" / ".bin" / cli_bin
+        require_exists(bin_path)
+        bin_output = run_command(
+            "install/scoped-matrix beta bin executes",
+            dist_tag_fixture,
+            [str(bin_path)],
+            extra_env=scenario_env,
+        )
+        require_contains(
+            bin_output,
+            "scoped-cli@2.0.0-beta.1",
+            "install/scoped-matrix beta bin output",
+        )
+        uninstall_result = run_command_result(
+            "install/scoped-matrix uninstall scoped package json",
+            dist_tag_fixture,
+            [str(LPM_BIN), "uninstall", scoped_cli, "--json"],
+            extra_env=scenario_env,
+        )
+        if uninstall_result.returncode != 0:
+            raise SmokeFailure(
+                "install/scoped-matrix uninstall scoped package json failed with exit code "
+                f"{uninstall_result.returncode}"
+            )
+        uninstall_envelope = parse_json_stdout(
+            "install/scoped-matrix uninstall scoped package json",
+            uninstall_result,
+        )
+        if uninstall_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/scoped-matrix uninstall scoped package json: expected success=true"
+            )
+        if uninstall_envelope.get("removed") != [scoped_cli]:
+            raise SmokeFailure(
+                "install/scoped-matrix uninstall scoped package json: expected removed[] to list the scoped package"
+            )
+        if read_dependency_spec(dist_tag_fixture / "package.json", scoped_cli) is not None:
+            raise SmokeFailure(
+                "install/scoped-matrix uninstall scoped package json: expected scoped dependency to be removed from package.json"
+            )
+        require_not_exists(dist_tag_fixture / "node_modules" / "@smoke" / "scoped-cli")
+
+        upgrade_fixture = reset_scoped_install_fixture("upgrade")
+        write_registry_npmrc(upgrade_fixture, registry.registry_url)
+        write_package_json(
+            upgrade_fixture / "package.json",
+            {
+                "name": "scoped-install-upgrade-smoke",
+                "private": True,
+                "version": "0.0.0",
+            },
+        )
+        run_command(
+            "install/scoped-matrix exact seed for upgrade",
+            upgrade_fixture,
+            [str(LPM_BIN), "install", f"{scoped_lib}@1.0.0", *install_flags],
+            extra_env=scenario_env,
+        )
+        if read_dependency_spec(upgrade_fixture / "package.json", scoped_lib) != "1.0.0":
+            raise SmokeFailure(
+                "install/scoped-matrix exact seed for upgrade: expected exact scoped version to be saved"
+            )
+        if read_installed_package_version(upgrade_fixture, scoped_lib) != "1.0.0":
+            raise SmokeFailure(
+                "install/scoped-matrix exact seed for upgrade: expected @smoke/scoped-lib 1.0.0 to be installed"
+            )
+        dry_run_result = run_command_result(
+            "install/scoped-matrix upgrade dry-run json",
+            upgrade_fixture,
+            [str(LPM_BIN), *registry_args, "upgrade", "-y", "--dry-run", "--json"],
+            extra_env=scenario_env,
+        )
+        if dry_run_result.returncode != 0:
+            raise SmokeFailure(
+                "install/scoped-matrix upgrade dry-run json failed with exit code "
+                f"{dry_run_result.returncode}"
+            )
+        dry_run_envelope = parse_json_stdout(
+            "install/scoped-matrix upgrade dry-run json",
+            dry_run_result,
+        )
+        if dry_run_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/scoped-matrix upgrade dry-run json: expected success=true"
+            )
+        if dry_run_envelope.get("upgraded") != 1:
+            raise SmokeFailure(
+                "install/scoped-matrix upgrade dry-run json: expected one upgrade candidate"
+            )
+        dry_run_packages = dry_run_envelope.get("packages")
+        if not isinstance(dry_run_packages, list) or len(dry_run_packages) != 1:
+            raise SmokeFailure(
+                "install/scoped-matrix upgrade dry-run json: expected one package entry"
+            )
+        dry_run_package = dry_run_packages[0]
+        if not isinstance(dry_run_package, dict):
+            raise SmokeFailure(
+                "install/scoped-matrix upgrade dry-run json: package entry must be an object"
+            )
+        if (
+            dry_run_package.get("name") != scoped_lib
+            or dry_run_package.get("new_range") != "1.2.0"
+        ):
+            raise SmokeFailure(
+                "install/scoped-matrix upgrade dry-run json: expected @smoke/scoped-lib candidate with exact new_range 1.2.0"
+            )
+        run_command(
+            "install/scoped-matrix upgrade applies latest scoped version",
+            upgrade_fixture,
+            [str(LPM_BIN), *registry_args, "upgrade", "-y"],
+            extra_env=scenario_env,
+        )
+        if read_dependency_spec(upgrade_fixture / "package.json", scoped_lib) != "1.2.0":
+            raise SmokeFailure(
+                "install/scoped-matrix upgrade applies latest scoped version: expected package.json to rewrite to exact 1.2.0"
+            )
+        if read_installed_package_version(upgrade_fixture, scoped_lib) != "1.2.0":
+            raise SmokeFailure(
+                "install/scoped-matrix upgrade applies latest scoped version: expected @smoke/scoped-lib 1.2.0 to be installed"
+            )
+
+
+def scenario_install_output_contract() -> None:
+    success_package = "output-contract-lib"
+    scripted_package = "output-contract-scripted"
+    registry_packages = [
+        {
+            "name": success_package,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"license": "MIT"},
+                    "files": {
+                        "index.js": "module.exports = 'output-contract-lib'\n",
+                    },
+                }
+            },
+        },
+        {
+            "name": scripted_package,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "scripts": {"postinstall": "node build.js"},
+                    },
+                    "package_json_extra": {
+                        "license": "MIT",
+                        "scripts": {"postinstall": "node build.js"},
+                    },
+                    "files": {
+                        "build.js": "require('node:fs').writeFileSync('script-ran.txt', 'blocked\\n')\n",
+                    },
+                }
+            },
+        },
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        scenario_env = smoke_home_env(
+            home_root,
+            LPM_FORCE_FILE_AUTH="1",
+            LPM_FORCE_FILE_VAULT="1",
+        )
+        install_flags = [
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+
+        human_fixture = reset_output_contract_fixture("human-success")
+        write_registry_npmrc(human_fixture, registry.registry_url)
+        write_package_json(
+            human_fixture / "package.json",
+            {
+                "name": "output-contract-human-smoke",
+                "private": True,
+                "version": "0.0.0",
+            },
+        )
+        human_result = run_command_result(
+            "install/output-contract human success",
+            human_fixture,
+            [str(LPM_BIN), "install", success_package, *install_flags],
+            extra_env=scenario_env,
+        )
+        if human_result.returncode != 0:
+            raise SmokeFailure(
+                "install/output-contract human success failed with exit code "
+                f"{human_result.returncode}"
+            )
+        human_combined = human_result.stdout + human_result.stderr
+        require_contains(
+            human_combined,
+            success_package,
+            "install/output-contract human success output",
+        )
+        if human_result.stdout.lstrip().startswith("{"):
+            raise SmokeFailure(
+                "install/output-contract human success: expected human mode stdout to avoid JSON envelopes"
+            )
+
+        json_fixture = reset_output_contract_fixture("json-success")
+        write_registry_npmrc(json_fixture, registry.registry_url)
+        write_package_json(
+            json_fixture / "package.json",
+            {
+                "name": "output-contract-json-smoke",
+                "private": True,
+                "version": "0.0.0",
+            },
+        )
+        json_result = run_command_result(
+            "install/output-contract json success",
+            json_fixture,
+            [str(LPM_BIN), "--json", "install", success_package, *install_flags],
+            extra_env=scenario_env,
+        )
+        if json_result.returncode != 0:
+            raise SmokeFailure(
+                "install/output-contract json success failed with exit code "
+                f"{json_result.returncode}"
+            )
+        json_envelope = parse_json_stdout(
+            "install/output-contract json success",
+            json_result,
+        )
+        if json_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/output-contract json success: expected success=true envelope"
+            )
+        if json_result.stderr.strip():
+            raise SmokeFailure(
+                f"install/output-contract json success: expected empty stderr, got {json_result.stderr!r}"
+            )
+        if any(needle in json_result.stdout for needle in ["Resolving dependencies", "Installing "]):
+            raise SmokeFailure(
+                "install/output-contract json success: expected stdout to contain only the JSON envelope"
+            )
+
+        failure_fixture = reset_output_contract_fixture("json-failure")
+        write_registry_npmrc(failure_fixture, registry.registry_url)
+        write_package_json(
+            failure_fixture / "package.json",
+            {
+                "name": "output-contract-json-failure-smoke",
+                "private": True,
+                "version": "0.0.0",
+            },
+        )
+        failure_result = run_command_result(
+            "install/output-contract json failure",
+            failure_fixture,
+            [str(LPM_BIN), "--json", "install", "output-contract-missing", *install_flags],
+            extra_env=scenario_env,
+        )
+        if failure_result.returncode == 0:
+            raise SmokeFailure(
+                "install/output-contract json failure: expected non-zero exit code"
+            )
+        failure_envelope = parse_json_stdout(
+            "install/output-contract json failure",
+            failure_result,
+        )
+        if failure_envelope.get("success") is not False:
+            raise SmokeFailure(
+                "install/output-contract json failure: expected success=false envelope"
+            )
+        if not isinstance(failure_envelope.get("error"), str):
+            raise SmokeFailure(
+                "install/output-contract json failure: expected string error message"
+            )
+        if not isinstance(failure_envelope.get("error_code"), str):
+            raise SmokeFailure(
+                "install/output-contract json failure: expected string error_code"
+            )
+        if failure_result.stderr.strip():
+            raise SmokeFailure(
+                f"install/output-contract json failure: expected empty stderr, got {failure_result.stderr!r}"
+            )
+
+        approval_fixture = reset_output_contract_fixture("approval-required")
+        write_registry_npmrc(approval_fixture, registry.registry_url)
+        write_package_json(
+            approval_fixture / "package.json",
+            {
+                "name": "output-contract-approval-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {scripted_package: "^1.0.0"},
+            },
+        )
+        blocked_output = run_command(
+            "install/output-contract blocked scripted install",
+            approval_fixture,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        require_contains(
+            blocked_output,
+            "approve-scripts",
+            "install/output-contract blocked scripted install output",
+        )
+        approval_result = run_command_result(
+            "install/output-contract approval envelope json",
+            approval_fixture,
+            [str(LPM_BIN), "--json", "approve-scripts", scripted_package],
+            extra_env=scenario_env,
+        )
+        approval_envelope = require_security_approval_envelope(
+            "install/output-contract approval envelope json",
+            approval_result,
+            "trust-bulk-approve",
+        )
+        if approval_result.stderr.strip():
+            raise SmokeFailure(
+                f"install/output-contract approval envelope json: expected empty stderr, got {approval_result.stderr!r}"
+            )
+        if (
+            approval_envelope.get("error", {}).get("suggested_command")
+            != "lpm security unlock trust-bulk-approve --project . --ttl 10m"
+        ):
+            raise SmokeFailure(
+                "install/output-contract approval envelope json: expected the trust-bulk-approve unlock hint"
+            )
 
 
 def scenario_install_outdated() -> None:
@@ -4774,6 +5989,822 @@ def scenario_install_read_only_routing() -> None:
                 "install/read-only-routing download: expected routed npm tarball extraction metadata"
             )
         require_exists(fixture / "downloaded-package" / "package.json")
+
+
+def scenario_install_adversarial_packument() -> None:
+    package_name = "smoke-adversarial-packument"
+    version = "1.0.0"
+    integrity = compute_sha512_sri(b"adversarial-packument-smoke")
+    install_flags = [
+        "--no-skills",
+        "--no-editor-setup",
+        "--no-security-summary",
+    ]
+
+    def encode_metadata(metadata: dict[str, object]) -> bytes:
+        return json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+
+    def encode_batch_metadata(metadata: dict[str, object]) -> bytes:
+        return (
+            json.dumps({"name": package_name, "metadata": metadata}, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+
+    def run_case(
+        case_name: str,
+        packument_body: bytes,
+        batch_metadata_body: bytes,
+        expected_needles: list[str],
+    ) -> None:
+        with MockRegistry(
+            [],
+            extra_routes={
+                f"/{package_name}": ("application/json", packument_body),
+                f"/api/registry/{package_name}": ("application/json", packument_body),
+                "/api/registry/batch-metadata": (
+                    "application/x-ndjson",
+                    batch_metadata_body,
+                ),
+            },
+        ) as registry, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
+            fixture = reset_adversarial_packument_fixture(case_name)
+            baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
+            write_registry_npmrc(fixture, registry.registry_url)
+            output = run_command_expect_failure(
+                f"install/adversarial-packument {case_name}",
+                fixture,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=smoke_home_env(home_root),
+            )
+
+            lowered_output = output.lower()
+            if not any(needle in lowered_output for needle in expected_needles):
+                raise SmokeFailure(
+                    f"install/adversarial-packument {case_name}: expected one of {expected_needles!r} in output, got {output!r}"
+                )
+
+            if any(path.startswith("/tarballs/") for path in registry.requested_paths()):
+                raise SmokeFailure(
+                    f"install/adversarial-packument {case_name}: expected malformed metadata to fail before any tarball fetch"
+                )
+
+            require_not_exists(
+                fixture / "node_modules" / package_name,
+            )
+            require_not_exists(fixture / "lpm.lock")
+            require_not_exists(fixture / "lpm.lockb")
+            if (fixture / "package.json").read_text(encoding="utf-8") != baseline_package_json:
+                raise SmokeFailure(
+                    f"install/adversarial-packument {case_name}: expected fixture package.json to stay byte-identical"
+                )
+
+    run_case(
+        "invalid-packument-json",
+        b"{",
+        b'{"name":"smoke-adversarial-packument","metadata":',
+        ["json", "parse", "metadata"],
+    )
+
+    missing_dist_tarball_metadata = {
+        "name": package_name,
+        "dist-tags": {"latest": version},
+        "versions": {
+            version: {
+                "name": package_name,
+                "version": version,
+                "dist": {"integrity": integrity},
+                "dependencies": {},
+            }
+        },
+        "time": {version: "2024-01-01T00:00:00.000Z"},
+    }
+    run_case(
+        "missing-dist-tarball",
+        encode_metadata(missing_dist_tarball_metadata),
+        encode_batch_metadata(missing_dist_tarball_metadata),
+        ["tarball", "not found", "dist"],
+    )
+
+    invalid_versions_shape_metadata = {
+        "name": package_name,
+        "dist-tags": {"latest": version},
+        "versions": [],
+        "time": {version: "2024-01-01T00:00:00.000Z"},
+    }
+    run_case(
+        "invalid-versions-shape",
+        encode_metadata(invalid_versions_shape_metadata),
+        encode_batch_metadata(invalid_versions_shape_metadata),
+        ["versions", "metadata", "package"],
+    )
+
+    missing_versions_metadata = {
+        "name": package_name,
+        "dist-tags": {"latest": version},
+        "time": {version: "2024-01-01T00:00:00.000Z"},
+    }
+    run_case(
+        "missing-versions-block",
+        encode_metadata(missing_versions_metadata),
+        encode_batch_metadata(missing_versions_metadata),
+        ["versions", "metadata", "package"],
+    )
+
+
+def scenario_install_corrupt_tarball() -> None:
+    package_name = "smoke-corrupt-tarball"
+    version = "1.0.0"
+    install_flags = [
+        "--no-skills",
+        "--no-editor-setup",
+        "--no-security-summary",
+    ]
+
+    def build_custom_tarball(files: dict[str, str]) -> bytes:
+        tar_stream = io.BytesIO()
+        with tarfile.open(fileobj=tar_stream, mode="w:gz") as archive:
+            for path, content in files.items():
+                add_tar_text_file(archive, path, content)
+        return tar_stream.getvalue()
+
+    def build_packument(registry_url: str, integrity_value: str) -> tuple[bytes, bytes]:
+        tarball_url = f"{registry_url}tarballs/{package_name}/-/{package_name}-{version}.tgz"
+        metadata = {
+            "name": package_name,
+            "dist-tags": {"latest": version},
+            "versions": {
+                version: {
+                    "name": package_name,
+                    "version": version,
+                    "dist": {
+                        "tarball": tarball_url,
+                        "integrity": integrity_value,
+                    },
+                    "dependencies": {},
+                }
+            },
+            "time": {version: "2024-01-01T00:00:00.000Z"},
+        }
+        metadata_bytes = json.dumps(metadata, separators=(",", ":")).encode("utf-8")
+        batch_bytes = (
+            json.dumps({"name": package_name, "metadata": metadata}, separators=(",", ":"))
+            + "\n"
+        ).encode("utf-8")
+        return metadata_bytes, batch_bytes
+
+    def run_case(case_name: str, tarball: bytes, integrity_value: str, expected_needles: list[str]) -> None:
+        with MockRegistry([]) as registry, tempfile.TemporaryDirectory(
+            prefix="lpm-smoke-home-"
+        ) as home_root:
+            if registry._server is None:
+                raise SmokeFailure(f"install/corrupt-tarball {case_name}: registry server missing")
+
+            fixture = reset_corrupt_tarball_fixture(case_name, package_name)
+            baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
+            write_registry_npmrc(fixture, registry.registry_url)
+
+            tarball_path = f"/tarballs/{package_name}/-/{package_name}-{version}.tgz"
+            metadata_bytes, batch_bytes = build_packument(registry.registry_url, integrity_value)
+            registry._server.routes.update(
+                {
+                    f"/{package_name}": ("application/json", metadata_bytes),
+                    f"/api/registry/{package_name}": ("application/json", metadata_bytes),
+                    "/api/registry/batch-metadata": ("application/x-ndjson", batch_bytes),
+                    tarball_path: ("application/octet-stream", tarball),
+                }
+            )
+
+            output = run_command_expect_failure(
+                f"install/corrupt-tarball {case_name}",
+                fixture,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=smoke_home_env(home_root),
+            )
+
+            lowered_output = output.lower()
+            if not any(needle in lowered_output for needle in expected_needles):
+                raise SmokeFailure(
+                    f"install/corrupt-tarball {case_name}: expected one of {expected_needles!r} in output, got {output!r}"
+                )
+
+            require_not_exists(fixture / "node_modules" / package_name)
+            require_not_exists(fixture / "lpm.lock")
+            require_not_exists(fixture / "lpm.lockb")
+            if (fixture / "package.json").read_text(encoding="utf-8") != baseline_package_json:
+                raise SmokeFailure(
+                    f"install/corrupt-tarball {case_name}: expected fixture package.json to stay unchanged"
+                )
+
+    valid_tarball = build_package_tarball(package_name, version, {}, {})
+    truncated_tarball = valid_tarball[:-16]
+    gzip_non_tar_tarball = gzip.compress(b"this is not a tar archive")
+
+    run_case(
+        "truncated-gzip",
+        truncated_tarball,
+        compute_sha512_sri(truncated_tarball),
+        ["archive", "gzip", "tar", "extract"],
+    )
+    run_case(
+        "gzip-non-tar",
+        gzip_non_tar_tarball,
+        compute_sha512_sri(gzip_non_tar_tarball),
+        ["archive", "tar", "header", "extract"],
+    )
+    run_case(
+        "integrity-mismatch",
+        valid_tarball,
+        compute_sha512_sri(b"wrong tarball bytes"),
+        ["integrity", "checksum", "sha512", "hash"],
+    )
+
+
+def scenario_install_transaction_rollback() -> None:
+    good_name = "smoke-rollback-good"
+    bad_name = "smoke-rollback-bad"
+    version = "1.0.0"
+    install_flags = [
+        "--no-skills",
+        "--no-editor-setup",
+        "--no-security-summary",
+    ]
+
+    def build_metadata(registry_url: str, package_name: str, integrity_value: str) -> dict[str, object]:
+        return {
+            "name": package_name,
+            "dist-tags": {"latest": version},
+            "versions": {
+                version: {
+                    "name": package_name,
+                    "version": version,
+                    "dist": {
+                        "tarball": f"{registry_url}tarballs/{package_name}/-/{package_name}-{version}.tgz",
+                        "integrity": integrity_value,
+                    },
+                    "dependencies": {},
+                }
+            },
+            "time": {version: "2024-01-01T00:00:00.000Z"},
+        }
+
+    def encode_batch_metadata(rows: list[dict[str, object]]) -> bytes:
+        return (
+            "\n".join(
+                json.dumps(
+                    {
+                        "name": row["name"],
+                        "metadata": row["metadata"],
+                    },
+                    separators=(",", ":"),
+                )
+                for row in rows
+            )
+            + "\n"
+        ).encode("utf-8")
+
+    with MockRegistry([]) as registry, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
+        if registry._server is None:
+            raise SmokeFailure("install/transaction-rollback: registry server missing")
+
+        fixture = reset_transaction_rollback_fixture(good_name, bad_name)
+        baseline_package_json = (fixture / "package.json").read_text(encoding="utf-8")
+        write_registry_npmrc(fixture, registry.registry_url)
+
+        good_tarball = build_package_tarball(good_name, version, {}, {})
+        bad_tarball = build_package_tarball(bad_name, version, {}, {})
+        good_metadata = build_metadata(registry.registry_url, good_name, compute_sha512_sri(good_tarball))
+        bad_metadata = build_metadata(registry.registry_url, bad_name, compute_sha512_sri(b"wrong rollback tarball"))
+
+        registry._server.routes.update(
+            {
+                f"/{good_name}": (
+                    "application/json",
+                    json.dumps(good_metadata, separators=(",", ":")).encode("utf-8"),
+                ),
+                f"/api/registry/{good_name}": (
+                    "application/json",
+                    json.dumps(good_metadata, separators=(",", ":")).encode("utf-8"),
+                ),
+                f"/{bad_name}": (
+                    "application/json",
+                    json.dumps(bad_metadata, separators=(",", ":")).encode("utf-8"),
+                ),
+                f"/api/registry/{bad_name}": (
+                    "application/json",
+                    json.dumps(bad_metadata, separators=(",", ":")).encode("utf-8"),
+                ),
+                "/api/registry/batch-metadata": (
+                    "application/x-ndjson",
+                    encode_batch_metadata(
+                        [
+                            {"name": good_name, "metadata": good_metadata},
+                            {"name": bad_name, "metadata": bad_metadata},
+                        ]
+                    ),
+                ),
+                f"/tarballs/{good_name}/-/{good_name}-{version}.tgz": (
+                    "application/octet-stream",
+                    good_tarball,
+                ),
+                f"/tarballs/{bad_name}/-/{bad_name}-{version}.tgz": (
+                    "application/octet-stream",
+                    bad_tarball,
+                ),
+            }
+        )
+
+        failure_output = run_command_expect_failure(
+            "install/transaction-rollback initial failure",
+            fixture,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=smoke_home_env(home_root),
+        )
+        require_contains(
+            failure_output.lower(),
+            "integrity mismatch",
+            "install/transaction-rollback initial output",
+        )
+        require_not_exists(fixture / "node_modules" / good_name)
+        require_not_exists(fixture / "node_modules" / bad_name)
+        require_not_exists(fixture / "lpm.lock")
+        require_not_exists(fixture / "lpm.lockb")
+        if (fixture / "package.json").read_text(encoding="utf-8") != baseline_package_json:
+            raise SmokeFailure(
+                "install/transaction-rollback initial failure: expected fixture package.json to stay unchanged"
+            )
+
+        fixed_bad_metadata = build_metadata(registry.registry_url, bad_name, compute_sha512_sri(bad_tarball))
+        registry._server.routes.update(
+            {
+                f"/{bad_name}": (
+                    "application/json",
+                    json.dumps(fixed_bad_metadata, separators=(",", ":")).encode("utf-8"),
+                ),
+                f"/api/registry/{bad_name}": (
+                    "application/json",
+                    json.dumps(fixed_bad_metadata, separators=(",", ":")).encode("utf-8"),
+                ),
+                "/api/registry/batch-metadata": (
+                    "application/x-ndjson",
+                    encode_batch_metadata(
+                        [
+                            {"name": good_name, "metadata": good_metadata},
+                            {"name": bad_name, "metadata": fixed_bad_metadata},
+                        ]
+                    ),
+                ),
+            }
+        )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-retry-") as retry_home_root:
+            rerun_output = run_command(
+                "install/transaction-rollback rerun succeeds",
+                fixture,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=smoke_home_env(retry_home_root),
+            )
+            require_contains(rerun_output, good_name, "install/transaction-rollback rerun output")
+            require_contains(rerun_output, bad_name, "install/transaction-rollback rerun output")
+            require_exists(fixture / "node_modules" / good_name / "package.json")
+            require_exists(fixture / "node_modules" / bad_name / "package.json")
+            require_exists(fixture / "lpm.lock")
+            require_exists(fixture / "lpm.lockb")
+
+
+def scenario_install_permissions_collision() -> None:
+    package_name = "smoke-permissions-collision"
+    version = "1.0.0"
+    install_flags = [
+        "--no-skills",
+        "--no-editor-setup",
+        "--no-security-summary",
+    ]
+    registry_packages = [
+        {
+            "name": package_name,
+            "dist_tags": {"latest": version},
+            "versions": {
+                version: {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                }
+            },
+        }
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        scenario_env = smoke_home_env(home_root)
+
+        readonly_root_fixture = reset_permissions_collision_fixture("readonly-root", package_name)
+        baseline_package_json = (readonly_root_fixture / "package.json").read_text(encoding="utf-8")
+        write_registry_npmrc(readonly_root_fixture, registry.registry_url)
+        readonly_root_fixture.chmod(0o555)
+        try:
+            readonly_root_output = run_command_expect_failure(
+                "install/permissions-collision readonly root",
+                readonly_root_fixture,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=scenario_env,
+            )
+        finally:
+            readonly_root_fixture.chmod(0o755)
+        if not any(
+            needle in readonly_root_output.lower()
+            for needle in ["permission denied", "os error", "read-only", "denied"]
+        ):
+            raise SmokeFailure(
+                f"install/permissions-collision readonly root: expected a permissions error, got {readonly_root_output!r}"
+            )
+        require_not_exists(readonly_root_fixture / "node_modules" / package_name)
+        require_not_exists(readonly_root_fixture / "lpm.lock")
+        require_not_exists(readonly_root_fixture / "lpm.lockb")
+        if (readonly_root_fixture / "package.json").read_text(encoding="utf-8") != baseline_package_json:
+            raise SmokeFailure(
+                "install/permissions-collision readonly root: expected fixture package.json to stay unchanged"
+            )
+
+        lockfile_fixture = reset_permissions_collision_fixture("occupied-lockfile", package_name)
+        baseline_package_json = (lockfile_fixture / "package.json").read_text(encoding="utf-8")
+        write_registry_npmrc(lockfile_fixture, registry.registry_url)
+        occupied_lockfile_dir = lockfile_fixture / "lpm.lock"
+        occupied_lockfile_dir.mkdir(parents=True, exist_ok=True)
+
+        lockfile_output = run_command_expect_failure(
+            "install/permissions-collision occupied lockfile",
+            lockfile_fixture,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        if not any(
+            needle in lockfile_output.lower()
+            for needle in ["lpm.lock", "directory", "file exists", "is a directory", "os error"]
+        ):
+            raise SmokeFailure(
+                f"install/permissions-collision occupied lockfile: expected a lockfile collision error, got {lockfile_output!r}"
+            )
+        require_exists(occupied_lockfile_dir)
+        require_not_exists(lockfile_fixture / "lpm.lockb")
+        if (lockfile_fixture / "package.json").read_text(encoding="utf-8") != baseline_package_json:
+            raise SmokeFailure(
+                "install/permissions-collision occupied lockfile: expected fixture package.json to stay unchanged"
+            )
+
+        delete_path(occupied_lockfile_dir)
+        with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-retry-") as retry_home_root:
+            rerun_output = run_command(
+                "install/permissions-collision occupied lockfile rerun",
+                lockfile_fixture,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=smoke_home_env(retry_home_root),
+            )
+            require_contains(
+                rerun_output,
+                package_name,
+                "install/permissions-collision occupied lockfile rerun output",
+            )
+            require_exists(lockfile_fixture / "node_modules" / package_name / "package.json")
+            require_exists(lockfile_fixture / "lpm.lock")
+            require_exists(lockfile_fixture / "lpm.lockb")
+
+
+def scenario_install_lockfile_drift() -> None:
+    present_package = "smoke-doctor-present"
+    missing_package = "smoke-doctor-missing"
+    version = "1.0.0"
+    registry_packages = [
+        {
+            "name": present_package,
+            "dist_tags": {"latest": version},
+            "versions": {
+                version: {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                }
+            },
+        },
+        {
+            "name": missing_package,
+            "dist_tags": {"latest": version},
+            "versions": {
+                version: {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                }
+            },
+        },
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        fixture = reset_doctor_drift_fixture(present_package)
+        write_registry_npmrc(fixture, registry.registry_url)
+
+        scenario_env = smoke_home_env(home_root)
+        command_prefix = [
+            str(LPM_BIN),
+            "--registry",
+            registry.registry_url,
+            "--insecure",
+        ]
+
+        run_command(
+            "install/lockfile-drift seed install",
+            fixture,
+            [
+                *command_prefix,
+                "install",
+                "--no-skills",
+                "--no-editor-setup",
+                "--no-security-summary",
+            ],
+            extra_env=scenario_env,
+        )
+
+        package_json = read_json_file(fixture / "package.json")
+        dependencies = dict(package_json.get("dependencies", {}))
+        dependencies[missing_package] = version
+        package_json["dependencies"] = dependencies
+        write_package_json(fixture / "package.json", package_json)
+
+        requests_before_drift = list(registry.requested_paths())
+
+        drift_result = run_command_result(
+            "install/lockfile-drift doctor json",
+            fixture,
+            [*command_prefix, "doctor", "--json"],
+            extra_env=scenario_env,
+        )
+        if drift_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/lockfile-drift doctor json failed with exit code {drift_result.returncode}"
+            )
+        drift_envelope = json.loads(drift_result.stdout)
+        if drift_envelope.get("success") is not True:
+            raise SmokeFailure("install/lockfile-drift doctor json: expected success=true")
+        if drift_envelope.get("mode") != "fast":
+            raise SmokeFailure("install/lockfile-drift doctor json: expected mode=fast")
+        if drift_envelope.get("has_warnings") is not True:
+            raise SmokeFailure(
+                "install/lockfile-drift doctor json: expected has_warnings=true for deps_sync_drift"
+            )
+        if drift_envelope.get("clean") is not False:
+            raise SmokeFailure("install/lockfile-drift doctor json: expected clean=false")
+        drift_checks = {
+            check.get("code"): check for check in drift_envelope.get("checks", [])
+        }
+        drift_check = drift_checks.get("deps_sync_drift")
+        if drift_check is None:
+            raise SmokeFailure(
+                "install/lockfile-drift doctor json: expected deps_sync_drift check"
+            )
+        if drift_check.get("severity") != "warn":
+            raise SmokeFailure(
+                "install/lockfile-drift doctor json: expected deps_sync_drift severity=warn"
+            )
+        require_contains(
+            drift_check.get("detail", ""),
+            missing_package,
+            "install/lockfile-drift doctor drift detail",
+        )
+        require_contains(
+            drift_check.get("detail", ""),
+            "run: lpm install",
+            "install/lockfile-drift doctor drift detail",
+        )
+        if registry.requested_paths() != requests_before_drift:
+            raise SmokeFailure(
+                "install/lockfile-drift doctor json: expected fast-mode drift detection to avoid registry requests"
+            )
+
+        fix_result = run_command_result(
+            "install/lockfile-drift doctor fix json",
+            fixture,
+            [*command_prefix, "doctor", "--fix", "--json"],
+            extra_env=scenario_env,
+        )
+        if fix_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/lockfile-drift doctor fix json failed with exit code {fix_result.returncode}"
+            )
+        fix_envelope = json.loads(fix_result.stdout)
+        if fix_envelope.get("success") is not True:
+            raise SmokeFailure("install/lockfile-drift doctor fix json: expected success=true")
+        if "lpm install (deps sync)" not in fix_envelope.get("fixes_applied", []):
+            raise SmokeFailure(
+                "install/lockfile-drift doctor fix json: expected fixes_applied to include lpm install (deps sync)"
+            )
+        if registry.requested_paths() == requests_before_drift:
+            raise SmokeFailure(
+                "install/lockfile-drift doctor fix json: expected --fix to hit the registry via lpm install"
+            )
+        require_exists(fixture / "node_modules" / present_package / "package.json")
+        require_exists(fixture / "node_modules" / missing_package / "package.json")
+        require_exists(fixture / "lpm.lock")
+        require_exists(fixture / "lpm.lockb")
+        lockfile_text = read_optional_text(fixture / "lpm.lock")
+        require_contains(
+            lockfile_text,
+            f'name = "{missing_package}"',
+            "install/lockfile-drift rewritten lockfile",
+        )
+
+        rerun_result = run_command_result(
+            "install/lockfile-drift doctor rerun json",
+            fixture,
+            [*command_prefix, "doctor", "--json"],
+            extra_env=scenario_env,
+        )
+        if rerun_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/lockfile-drift doctor rerun json failed with exit code {rerun_result.returncode}"
+            )
+        rerun_envelope = json.loads(rerun_result.stdout)
+        if rerun_envelope.get("clean") is not True:
+            raise SmokeFailure("install/lockfile-drift doctor rerun json: expected clean=true")
+        rerun_checks = {
+            check.get("code"): check for check in rerun_envelope.get("checks", [])
+        }
+        clean_check = rerun_checks.get("deps_sync_clean")
+        if clean_check is None or clean_check.get("severity") != "pass":
+            raise SmokeFailure(
+                "install/lockfile-drift doctor rerun json: expected deps_sync_clean severity=pass"
+            )
+
+
+def scenario_install_lockfile_contract() -> None:
+    package_name = "smoke-lockfile-present"
+    version = "1.0.0"
+    registry_packages = [
+        {
+            "name": package_name,
+            "dist_tags": {"latest": version},
+            "versions": {
+                version: {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"license": "MIT"},
+                    "files": {
+                        "index.js": "module.exports = 'lockfile-contract'\n",
+                    },
+                }
+            },
+        }
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        scenario_env = smoke_home_env(home_root)
+        command_prefix = [
+            str(LPM_BIN),
+            "--registry",
+            registry.registry_url,
+            "--insecure",
+        ]
+        install_flags = [
+            "install",
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+
+        def seed_fixture(name: str) -> Path:
+            fixture = reset_lockfile_contract_fixture(name, package_name)
+            write_registry_npmrc(fixture, registry.registry_url)
+            run_command(
+                f"install/lockfile-contract seed {name}",
+                fixture,
+                [*command_prefix, *install_flags],
+                extra_env=scenario_env,
+            )
+            return fixture
+
+        healthy_fixture = seed_fixture("healthy-fast-path")
+        requests_before_healthy = list(registry.requested_paths())
+        package_json_before = (healthy_fixture / "package.json").read_bytes()
+        lockfile_before = (healthy_fixture / "lpm.lock").read_bytes()
+        lockfile_binary_before = (healthy_fixture / "lpm.lockb").read_bytes()
+        healthy_result = run_command_result(
+            "install/lockfile-contract healthy fast path json",
+            healthy_fixture,
+            [*command_prefix, "--json", *install_flags],
+            extra_env=scenario_env,
+        )
+        if healthy_result.returncode != 0:
+            raise SmokeFailure(
+                "install/lockfile-contract healthy fast path json failed with exit code "
+                f"{healthy_result.returncode}"
+            )
+        healthy_envelope = parse_json_stdout(
+            "install/lockfile-contract healthy fast path json",
+            healthy_result,
+        )
+        if healthy_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/lockfile-contract healthy fast path json: expected success=true"
+            )
+        if healthy_envelope.get("up_to_date") is not True:
+            raise SmokeFailure(
+                "install/lockfile-contract healthy fast path json: expected up_to_date=true on a healthy rerun"
+            )
+        if registry.requested_paths() != requests_before_healthy:
+            raise SmokeFailure(
+                "install/lockfile-contract healthy fast path json: expected no additional registry traffic on lockfile fast path"
+            )
+        if (healthy_fixture / "package.json").read_bytes() != package_json_before:
+            raise SmokeFailure(
+                "install/lockfile-contract healthy fast path json: expected package.json to stay unchanged"
+            )
+        if (healthy_fixture / "lpm.lock").read_bytes() != lockfile_before:
+            raise SmokeFailure(
+                "install/lockfile-contract healthy fast path json: expected lpm.lock to stay unchanged"
+            )
+        if (healthy_fixture / "lpm.lockb").read_bytes() != lockfile_binary_before:
+            raise SmokeFailure(
+                "install/lockfile-contract healthy fast path json: expected lpm.lockb to stay unchanged"
+            )
+
+        missing_binary_fixture = seed_fixture("missing-binary-upgrade")
+        delete_path(missing_binary_fixture / "lpm.lockb")
+        requests_before_missing_binary = list(registry.requested_paths())
+        lockfile_before_missing_binary = (missing_binary_fixture / "lpm.lock").read_bytes()
+        missing_binary_result = run_command_result(
+            "install/lockfile-contract missing binary json",
+            missing_binary_fixture,
+            [*command_prefix, "--json", *install_flags],
+            extra_env=scenario_env,
+        )
+        if missing_binary_result.returncode != 0:
+            raise SmokeFailure(
+                "install/lockfile-contract missing binary json failed with exit code "
+                f"{missing_binary_result.returncode}"
+            )
+        missing_binary_envelope = parse_json_stdout(
+            "install/lockfile-contract missing binary json",
+            missing_binary_result,
+        )
+        if missing_binary_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/lockfile-contract missing binary json: expected success=true"
+            )
+        if missing_binary_envelope.get("used_lockfile") is not True:
+            raise SmokeFailure(
+                "install/lockfile-contract missing binary json: expected used_lockfile=true when only lpm.lock remains"
+            )
+        if registry.requested_paths() != requests_before_missing_binary:
+            raise SmokeFailure(
+                "install/lockfile-contract missing binary json: expected no additional registry traffic when upgrading missing lpm.lockb"
+            )
+        require_exists(missing_binary_fixture / "lpm.lockb")
+        if (missing_binary_fixture / "lpm.lock").read_bytes() != lockfile_before_missing_binary:
+            raise SmokeFailure(
+                "install/lockfile-contract missing binary json: expected lpm.lock to stay unchanged while recreating lpm.lockb"
+            )
+
+        missing_lockfile_fixture = seed_fixture("missing-text-lockfile")
+        delete_path(missing_lockfile_fixture / "lpm.lock")
+        missing_lockfile_result = run_command_result(
+            "install/lockfile-contract missing text lockfile json",
+            missing_lockfile_fixture,
+            [*command_prefix, "--json", *install_flags],
+            extra_env=scenario_env,
+        )
+        if missing_lockfile_result.returncode != 0:
+            raise SmokeFailure(
+                "install/lockfile-contract missing text lockfile json failed with exit code "
+                f"{missing_lockfile_result.returncode}"
+            )
+        missing_lockfile_envelope = parse_json_stdout(
+            "install/lockfile-contract missing text lockfile json",
+            missing_lockfile_result,
+        )
+        if missing_lockfile_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/lockfile-contract missing text lockfile json: expected success=true"
+            )
+        if missing_lockfile_envelope.get("used_lockfile") is not False:
+            raise SmokeFailure(
+                "install/lockfile-contract missing text lockfile json: expected used_lockfile=false when lpm.lock is absent"
+            )
+        packages = missing_lockfile_envelope.get("packages") or []
+        if missing_lockfile_envelope.get("count") != 1 or not any(
+            package.get("name") == package_name for package in packages
+        ):
+            raise SmokeFailure(
+                "install/lockfile-contract missing text lockfile json: expected a concrete reinstall result after losing lpm.lock"
+            )
+        require_exists(missing_lockfile_fixture / "lpm.lock")
+        require_exists(missing_lockfile_fixture / "lpm.lockb")
+        require_contains(
+            (missing_lockfile_fixture / "lpm.lock").read_text(encoding="utf-8"),
+            package_name,
+            "install/lockfile-contract rewritten lockfile",
+        )
 
 
 def scenario_workspace_uninstall() -> None:
@@ -5430,6 +7461,464 @@ def scenario_install_peer_deps() -> None:
         )
 
 
+def scenario_install_optional_deps_hard_mode() -> None:
+    registry_packages = [
+        {
+            "name": "required-anchor",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {
+                        "index.js": "module.exports = 'required-anchor'\n",
+                    },
+                }
+            },
+        },
+        {
+            "name": "optional-build-fail",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "scripts": {"postinstall": "node build.js"},
+                    },
+                    "package_json_extra": {
+                        "scripts": {"postinstall": "node build.js"},
+                    },
+                    "files": {
+                        "build.js": (
+                            "process.stderr.write('optional-build-fail script failed intentionally\\n')\n"
+                            "process.exit(1)\n"
+                        ),
+                        "index.js": "module.exports = 'optional-build-fail'\n",
+                    },
+                }
+            },
+        },
+        {
+            "name": "optional-build-root",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {"required-anchor": "^1.0.0"},
+                        "optionalDependencies": {"optional-build-fail": "^1.0.0"},
+                    },
+                    "package_json_extra": {
+                        "dependencies": {"required-anchor": "^1.0.0"},
+                        "optionalDependencies": {"optional-build-fail": "^1.0.0"},
+                    },
+                    "files": {
+                        "index.js": "module.exports = 'optional-build-root'\n",
+                    },
+                }
+            },
+        },
+        {
+            "name": "optional-platform-skip",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "os": ["linux"],
+                    },
+                    "package_json_extra": {
+                        "os": ["linux"],
+                    },
+                    "files": {
+                        "index.js": "module.exports = 'optional-platform-skip'\n",
+                    },
+                }
+            },
+        },
+        {
+            "name": "optional-platform-root",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {"required-anchor": "^1.0.0"},
+                        "optionalDependencies": {"optional-platform-skip": "^1.0.0"},
+                    },
+                    "package_json_extra": {
+                        "dependencies": {"required-anchor": "^1.0.0"},
+                        "optionalDependencies": {"optional-platform-skip": "^1.0.0"},
+                    },
+                    "files": {
+                        "index.js": "module.exports = 'optional-platform-root'\n",
+                    },
+                }
+            },
+        },
+        {
+            "name": "optional-offline-root",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {"required-anchor": "^1.0.0"},
+                        "optionalDependencies": {"optional-offline-missing": "^1.0.0"},
+                    },
+                    "package_json_extra": {
+                        "dependencies": {"required-anchor": "^1.0.0"},
+                        "optionalDependencies": {"optional-offline-missing": "^1.0.0"},
+                    },
+                    "files": {
+                        "index.js": "module.exports = 'optional-offline-root'\n",
+                    },
+                }
+            },
+        },
+        {
+            "name": "optional-peer-consumer",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "peerDependencies": {"missing-peer": "^1.0.0"},
+                    },
+                    "package_json_extra": {
+                        "peerDependencies": {"missing-peer": "^1.0.0"},
+                    },
+                    "files": {
+                        "index.js": "module.exports = 'optional-peer-consumer'\n",
+                    },
+                }
+            },
+        },
+        {
+            "name": "optional-peer-root",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {"required-anchor": "^1.0.0"},
+                        "optionalDependencies": {"optional-peer-consumer": "^1.0.0"},
+                    },
+                    "package_json_extra": {
+                        "dependencies": {"required-anchor": "^1.0.0"},
+                        "optionalDependencies": {"optional-peer-consumer": "^1.0.0"},
+                    },
+                    "files": {
+                        "index.js": "module.exports = 'optional-peer-root'\n",
+                    },
+                }
+            },
+        },
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        scenario_env = smoke_home_env(home_root, LPM_STORE_VERSION="v2")
+        install_flags = [
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+
+        trust_source_fixture = reset_optional_deps_fixture("trust-source")
+        write_registry_npmrc(trust_source_fixture, registry.registry_url)
+        write_package_json(
+            trust_source_fixture / "package.json",
+            {
+                "name": "optional-deps-trust-source-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {"optional-build-fail": "^1.0.0"},
+            },
+        )
+        run_command(
+            "install/optional-deps trust source blocked install",
+            trust_source_fixture,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        require_exists(trust_source_fixture / ".lpm" / "build-state.json")
+        trust_preview_result = run_command_result(
+            "install/optional-deps trust preview for scripted optional",
+            trust_source_fixture,
+            [
+                str(LPM_BIN),
+                "--json",
+                "approve-scripts",
+                "optional-build-fail",
+                "--dry-run",
+            ],
+            extra_env=scenario_env,
+        )
+        if trust_preview_result.returncode != 0:
+            raise SmokeFailure(
+                "install/optional-deps trust preview for scripted optional failed with exit code "
+                f"{trust_preview_result.returncode}"
+            )
+        trust_preview = parse_json_stdout(
+            "install/optional-deps trust preview for scripted optional",
+            trust_preview_result,
+        )
+        approved = trust_preview.get("approved")
+        if not isinstance(approved, list) or len(approved) != 1:
+            raise SmokeFailure(
+                "install/optional-deps trust preview for scripted optional: expected one approved entry"
+            )
+        approved_entry = approved[0]
+        if not isinstance(approved_entry, dict):
+            raise SmokeFailure(
+                "install/optional-deps trust preview for scripted optional: approved entry must be an object"
+            )
+        if os.environ.get(NATIVE_SECURITY_UNLOCK_ENV) == "1":
+            build_fail_fixture = reset_optional_deps_fixture("build-fail")
+            write_registry_npmrc(build_fail_fixture, registry.registry_url)
+            write_package_json(
+                build_fail_fixture / "package.json",
+                {
+                    "name": "optional-deps-build-fail-smoke",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {"optional-build-root": "^1.0.0"},
+                },
+            )
+            build_manifest = read_json_file(build_fail_fixture / "package.json")
+            lpm_block = build_manifest.setdefault("lpm", {})
+            if not isinstance(lpm_block, dict):
+                raise SmokeFailure(
+                    "install/optional-deps trust preview for scripted optional: expected lpm block to be an object"
+                )
+            lpm_block["trustedDependencies"] = {
+                "optional-build-fail@1.0.0": {
+                    "integrity": approved_entry.get("integrity"),
+                    "scriptHash": approved_entry.get("script_hash"),
+                }
+            }
+            write_package_json(build_fail_fixture / "package.json", build_manifest)
+            unlock_env = {
+                **scenario_env,
+                "LPM_FORCE_FILE_AUTH": "1",
+                "LPM_FORCE_FILE_VAULT": "1",
+            }
+            unlock_transcript = run_interactive_command(
+                "install/optional-deps unlock trust bulk approve",
+                build_fail_fixture,
+                [
+                    str(LPM_BIN),
+                    "security",
+                    "unlock",
+                    "trust-bulk-approve",
+                    "--project",
+                    ".",
+                    "--ttl",
+                    "10m",
+                ],
+                prompts=[],
+                extra_env=unlock_env,
+            )
+            require_contains(
+                unlock_transcript,
+                "Approved trust-bulk-approve for this project for 10 minutes.",
+                "install/optional-deps unlock trust bulk approve transcript",
+            )
+            build_fail_output = run_command(
+                "install/optional-deps build failure stays optional",
+                build_fail_fixture,
+                [str(LPM_BIN), "install", "--auto-build", *install_flags],
+                extra_env=unlock_env,
+            )
+            require_exists(build_fail_fixture / "node_modules" / "required-anchor" / "package.json")
+            require_contains(
+                build_fail_output,
+                "optional-build-fail script failed intentionally",
+                "install/optional-deps build failure output",
+            )
+        else:
+            log(
+                f"install/optional-deps scripted build failure: set {NATIVE_SECURITY_UNLOCK_ENV}=1 to exercise trusted auto-build failure handling"
+            )
+
+        platform_fixture = reset_optional_deps_fixture("platform-skip")
+        write_registry_npmrc(platform_fixture, registry.registry_url)
+        write_package_json(
+            platform_fixture / "package.json",
+            {
+                "name": "optional-deps-platform-skip-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {"optional-platform-root": "^1.0.0"},
+            },
+        )
+        platform_result = run_command_result(
+            "install/optional-deps platform skip json",
+            platform_fixture,
+            [str(LPM_BIN), "--json", "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        if platform_result.returncode != 0:
+            raise SmokeFailure(
+                "install/optional-deps platform skip json failed with exit code "
+                f"{platform_result.returncode}"
+            )
+        platform_envelope = parse_json_stdout(
+            "install/optional-deps platform skip json",
+            platform_result,
+        )
+        if platform_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/optional-deps platform skip json: expected success=true"
+            )
+        timing = platform_envelope.get("timing")
+        if not isinstance(timing, dict):
+            raise SmokeFailure(
+                "install/optional-deps platform skip json: expected timing object"
+            )
+        resolve_timing = timing.get("resolve")
+        if not isinstance(resolve_timing, dict):
+            raise SmokeFailure(
+                "install/optional-deps platform skip json: expected timing.resolve object"
+            )
+        if resolve_timing.get("platform_skipped", 0) < 1:
+            raise SmokeFailure(
+                "install/optional-deps platform skip json: expected timing.resolve.platform_skipped >= 1"
+            )
+        platform_packages = platform_envelope.get("packages")
+        if not isinstance(platform_packages, list):
+            raise SmokeFailure(
+                "install/optional-deps platform skip json: expected packages list"
+            )
+        platform_names = {
+            entry.get("name")
+            for entry in platform_packages
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+        }
+        if platform_names != {"optional-platform-root", "required-anchor"}:
+            raise SmokeFailure(
+                "install/optional-deps platform skip json: expected only optional-platform-root and required-anchor in packages[]"
+            )
+
+        offline_fixture = reset_optional_deps_fixture("missing-optional")
+        write_registry_npmrc(offline_fixture, registry.registry_url)
+        write_package_json(
+            offline_fixture / "package.json",
+            {
+                "name": "optional-deps-missing-optional-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {"optional-offline-root": "^1.0.0"},
+            },
+        )
+        offline_online_result = run_command_result(
+            "install/optional-deps online seed with missing optional",
+            offline_fixture,
+            [str(LPM_BIN), "--json", "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        if offline_online_result.returncode != 0:
+            raise SmokeFailure(
+                "install/optional-deps online seed with missing optional failed with exit code "
+                f"{offline_online_result.returncode}"
+            )
+        offline_online_envelope = parse_json_stdout(
+            "install/optional-deps online seed with missing optional",
+            offline_online_result,
+        )
+        offline_online_packages = offline_online_envelope.get("packages")
+        if not isinstance(offline_online_packages, list):
+            raise SmokeFailure(
+                "install/optional-deps online seed with missing optional: expected packages list"
+            )
+        offline_online_names = {
+            entry.get("name")
+            for entry in offline_online_packages
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+        }
+        if offline_online_names != {"optional-offline-root", "required-anchor"}:
+            raise SmokeFailure(
+                "install/optional-deps online seed with missing optional: expected only optional-offline-root and required-anchor in packages[]"
+            )
+
+        peer_fixture = reset_optional_deps_fixture("peer-interaction")
+        write_registry_npmrc(peer_fixture, registry.registry_url)
+        write_package_json(
+            peer_fixture / "package.json",
+            {
+                "name": "optional-deps-peer-interaction-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {"optional-peer-root": "^1.0.0"},
+                "lpm": {"autoInstallPeers": False},
+            },
+        )
+        peer_result = run_command_result(
+            "install/optional-deps peer interaction json",
+            peer_fixture,
+            [str(LPM_BIN), "--json", "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        if peer_result.returncode != 0:
+            raise SmokeFailure(
+                "install/optional-deps peer interaction json failed with exit code "
+                f"{peer_result.returncode}"
+            )
+        peer_envelope = parse_json_stdout(
+            "install/optional-deps peer interaction json",
+            peer_result,
+        )
+        if peer_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/optional-deps peer interaction json: expected success=true"
+            )
+        peer_issues = peer_envelope.get("peer_issues")
+        if not isinstance(peer_issues, dict):
+            raise SmokeFailure(
+                "install/optional-deps peer interaction json: expected peer_issues object"
+            )
+        if (
+            peer_issues.get("total_count") != 1
+            or peer_issues.get("missing_count") != 1
+            or peer_issues.get("bad_count") != 0
+            or peer_issues.get("conflicts_count") != 0
+        ):
+            raise SmokeFailure(
+                "install/optional-deps peer interaction json: expected one missing peer issue only"
+            )
+        missing_items = peer_issues.get("missing")
+        if not isinstance(missing_items, list) or len(missing_items) != 1:
+            raise SmokeFailure(
+                "install/optional-deps peer interaction json: expected one missing[] entry"
+            )
+        missing_issue = missing_items[0]
+        if not isinstance(missing_issue, dict):
+            raise SmokeFailure(
+                "install/optional-deps peer interaction json: missing[] entry must be an object"
+            )
+        if (
+            missing_issue.get("package") != "optional-peer-consumer"
+            or missing_issue.get("peer") != "missing-peer"
+            or missing_issue.get("required_range") != "^1.0.0"
+            or missing_issue.get("resolved_version") is not None
+        ):
+            raise SmokeFailure(
+                "install/optional-deps peer interaction json: unexpected missing peer payload"
+            )
+        peer_packages = peer_envelope.get("packages")
+        if not isinstance(peer_packages, list):
+            raise SmokeFailure(
+                "install/optional-deps peer interaction json: expected packages list"
+            )
+        peer_names = {
+            entry.get("name")
+            for entry in peer_packages
+            if isinstance(entry, dict) and isinstance(entry.get("name"), str)
+        }
+        if peer_names != {"optional-peer-root", "required-anchor", "optional-peer-consumer"}:
+            raise SmokeFailure(
+                "install/optional-deps peer interaction json: expected optional-peer-root, required-anchor, and optional-peer-consumer in packages[]"
+            )
+
+
 def scenario_install_catalog() -> None:
     registry_packages = [
         {
@@ -5644,7 +8133,17 @@ def scenario_install_script_policy() -> None:
                         "scripts": {"postinstall": "node build.js"},
                     },
                     "files": {
-                        "build.js": "require(\"node:fs\").writeFileSync(\"script-ran.txt\", \"green\\n\")\n",
+                        "build.js": (
+                            "const fs = require(\"node:fs\")\n"
+                            "const path = require(\"node:path\")\n"
+                            "const countPath = path.join(__dirname, \"build-count.txt\")\n"
+                            "let count = 0\n"
+                            "if (fs.existsSync(countPath)) {\n"
+                            "  count = Number(fs.readFileSync(countPath, \"utf8\")) || 0\n"
+                            "}\n"
+                            "fs.writeFileSync(countPath, String(count + 1))\n"
+                            "fs.writeFileSync(path.join(__dirname, \"script-ran.txt\"), \"green\\n\")\n"
+                        ),
                     },
                 }
             },
@@ -5667,17 +8166,100 @@ def scenario_install_script_policy() -> None:
                 }
             },
         },
+        {
+            "name": "smoke-script-order",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "scripts": {
+                            "preinstall": "node lifecycle.js preinstall",
+                            "install": "node lifecycle.js install",
+                            "postinstall": "node lifecycle.js postinstall",
+                        },
+                    },
+                    "package_json_extra": {
+                        "scripts": {
+                            "preinstall": "node lifecycle.js preinstall",
+                            "install": "node lifecycle.js install",
+                            "postinstall": "node lifecycle.js postinstall",
+                        },
+                    },
+                    "files": {
+                        "lifecycle.js": (
+                            "const fs = require(\"node:fs\")\n"
+                            "const path = require(\"node:path\")\n"
+                            "const stage = process.argv[2]\n"
+                            "fs.appendFileSync(path.join(__dirname, \"lifecycle-order.txt\"), `${stage}\\n`)\n"
+                        ),
+                    },
+                }
+            },
+        },
+        {
+            "name": "smoke-script-fail",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "scripts": {"postinstall": "node fail.js"},
+                    },
+                    "package_json_extra": {
+                        "scripts": {"postinstall": "node fail.js"},
+                    },
+                    "files": {
+                        "fail.js": (
+                            "const fs = require(\"node:fs\")\n"
+                            "const path = require(\"node:path\")\n"
+                            "fs.writeFileSync(path.join(__dirname, \"fail-marker.txt\"), \"fail\\n\")\n"
+                            "console.error(\"smoke-script-fail postinstall failed intentionally\")\n"
+                            "process.exit(1)\n"
+                        ),
+                    },
+                }
+            },
+        },
     ]
 
     with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
         prefix="lpm-smoke-home-"
     ) as home_root:
         scenario_env = smoke_home_env(home_root)
+        unlock_env = {
+            **scenario_env,
+            "LPM_FORCE_FILE_AUTH": "1",
+            "LPM_FORCE_FILE_VAULT": "1",
+        }
         install_flags = [
             "--no-skills",
             "--no-editor-setup",
             "--no-security-summary",
         ]
+
+        def unlock_scripts_allow(fixture: Path, context: str) -> None:
+            unlock_transcript = run_interactive_command(
+                context,
+                fixture,
+                [
+                    str(LPM_BIN),
+                    "security",
+                    "unlock",
+                    "scripts-allow",
+                    "--project",
+                    ".",
+                    "--ttl",
+                    "10m",
+                ],
+                prompts=[],
+                extra_env=unlock_env,
+            )
+            require_contains(
+                unlock_transcript,
+                "Temporary project unlock for scripts-allow is active for 10m.",
+                f"{context} transcript",
+            )
 
         default_deny_fixture = reset_script_policy_fixture("default-deny", "smoke-script-green")
         write_registry_npmrc(default_deny_fixture, registry.registry_url)
@@ -5766,6 +8348,105 @@ def scenario_install_script_policy() -> None:
         )
         require_not_exists(triage_fixture / "node_modules" / "smoke-script-amber" / "script-ran.txt")
         require_not_exists(triage_fixture / ".lpm" / "build-state.json")
+
+        explicit_unlock_fixture = reset_script_policy_fixture(
+            "explicit-unlock-success",
+            "smoke-script-green",
+        )
+        write_registry_npmrc(explicit_unlock_fixture, registry.registry_url)
+        write_package_json(
+            explicit_unlock_fixture / "package.json",
+            {
+                "name": "script-policy-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {
+                    "smoke-script-green": "^1.0.0",
+                    "smoke-script-order": "^1.0.0",
+                },
+                "lpm": {"scriptPolicy": "allow"},
+            },
+        )
+        unlock_scripts_allow(
+            explicit_unlock_fixture,
+            "install/script-policy explicit unlock scripts-allow",
+        )
+        run_command(
+            "install/script-policy explicit unlock auto-build runs scripts",
+            explicit_unlock_fixture,
+            [str(LPM_BIN), "install", "--auto-build", *install_flags],
+            extra_env=unlock_env,
+        )
+        green_build_count_path = (
+            explicit_unlock_fixture / "node_modules" / "smoke-script-green" / "build-count.txt"
+        )
+        if green_build_count_path.read_text(encoding="utf-8").strip() != "1":
+            raise SmokeFailure(
+                "install/script-policy explicit unlock auto-build runs scripts: expected smoke-script-green to run exactly once"
+            )
+        lifecycle_order_path = (
+            explicit_unlock_fixture / "node_modules" / "smoke-script-order" / "lifecycle-order.txt"
+        )
+        lifecycle_order = lifecycle_order_path.read_text(encoding="utf-8").splitlines()
+        if lifecycle_order != ["preinstall", "install", "postinstall"]:
+            raise SmokeFailure(
+                "install/script-policy explicit unlock auto-build runs scripts: expected stable preinstall/install/postinstall order"
+            )
+        run_command(
+            "install/script-policy targeted rebuild reruns only intended package",
+            explicit_unlock_fixture,
+            [str(LPM_BIN), "rebuild", "smoke-script-green", "--force"],
+            extra_env=unlock_env,
+        )
+        if green_build_count_path.read_text(encoding="utf-8").strip() != "2":
+            raise SmokeFailure(
+                "install/script-policy targeted rebuild reruns only intended package: expected smoke-script-green build count to increment to 2"
+            )
+        if lifecycle_order_path.read_text(encoding="utf-8").splitlines() != [
+            "preinstall",
+            "install",
+            "postinstall",
+        ]:
+            raise SmokeFailure(
+                "install/script-policy targeted rebuild reruns only intended package: expected smoke-script-order lifecycle log to stay unchanged"
+            )
+
+        failing_fixture = reset_script_policy_fixture("explicit-unlock-failure", "smoke-script-fail")
+        write_registry_npmrc(failing_fixture, registry.registry_url)
+        write_package_json(
+            failing_fixture / "package.json",
+            {
+                "name": "script-policy-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {"smoke-script-fail": "^1.0.0"},
+                "lpm": {"scriptPolicy": "allow"},
+            },
+        )
+        unlock_scripts_allow(
+            failing_fixture,
+            "install/script-policy explicit unlock for failing script",
+        )
+        failing_result = run_command_result(
+            "install/script-policy failing script surfaces failure but preserves install",
+            failing_fixture,
+            [str(LPM_BIN), "install", "--auto-build", *install_flags],
+            extra_env=unlock_env,
+        )
+        if failing_result.returncode != 0:
+            raise SmokeFailure(
+                "install/script-policy failing script surfaces failure but preserves install failed with exit code "
+                f"{failing_result.returncode}"
+            )
+        require_contains(
+            failing_result.stdout + failing_result.stderr,
+            "smoke-script-fail postinstall failed intentionally",
+            "install/script-policy failing script output",
+        )
+        require_exists(failing_fixture / "node_modules" / "smoke-script-fail" / "package.json")
+        require_exists(failing_fixture / "node_modules" / "smoke-script-fail" / "fail-marker.txt")
+        require_exists(failing_fixture / "lpm.lock")
+        require_exists(failing_fixture / "lpm.lockb")
 
 
 def scenario_install_offline_integrity() -> None:
@@ -19610,6 +22291,42 @@ SCENARIOS = {
         "Run info, resolve, search, and download against a project-local .npmrc registry without the proxy metadata path.",
         scenario_install_read_only_routing,
     ),
+    "install-adversarial-packument": (
+        "Run install-time malformed metadata coverage for invalid packument JSON, missing dist tarballs, invalid versions shapes, and absent versions blocks.",
+        scenario_install_adversarial_packument,
+    ),
+    "install-corrupt-tarball": (
+        "Run install-time corrupt tarball coverage for truncated gzip bodies, gzip-wrapped non-tar payloads, and integrity mismatches.",
+        scenario_install_corrupt_tarball,
+    ),
+    "install-transaction-rollback": (
+        "Run transactional install rollback coverage for an integrity-mismatch failure followed by a clean rerun in the same fixture.",
+        scenario_install_transaction_rollback,
+    ),
+    "install-permissions-collision": (
+        "Run install-time filesystem failure coverage for write-denied project roots and occupied lpm.lock collision recovery.",
+        scenario_install_permissions_collision,
+    ),
+    "install-lockfile-drift": (
+        "Run doctor deps-sync drift coverage for local warning detection, doctor --fix install dispatch, and a clean rerun.",
+        scenario_install_lockfile_drift,
+    ),
+    "install-lockfile-contract": (
+        "Run install lockfile coverage for healthy fast-path reuse, missing lpm.lockb binary regeneration without registry traffic, and missing lpm.lock fallback to fresh resolution.",
+        scenario_install_lockfile_contract,
+    ),
+    "install-optional-deps-hard-mode": (
+        "Run transitive optionalDependencies coverage for blocked scripted-package trust previews, platform-filtered skips, missing optional fetch skips, and peer-issue reporting, with an env-gated native-unlock path for trusted auto-build failures.",
+        scenario_install_optional_deps_hard_mode,
+    ),
+    "install-scoped-matrix": (
+        "Run scoped-package install coverage for bare save-policy installs, beta dist-tag bin wiring plus uninstall cleanup, and scoped upgrade application.",
+        scenario_install_scoped_matrix,
+    ),
+    "install-output-contract": (
+        "Run stdout/stderr/exit-code coverage for human install output, JSON success and failure envelopes, and approval-required JSON contract stability.",
+        scenario_install_output_contract,
+    ),
     "install-outdated": (
         "Run outdated coverage for dependencies plus devDependencies, resolved wanted versions, and the human-readable table.",
         scenario_install_outdated,
@@ -19651,7 +22368,7 @@ SCENARIOS = {
         scenario_install_offline_integrity,
     ),
     "install-script-policy": (
-        "Run default-deny lifecycle-script coverage plus guarded allow and triage manifest proposals.",
+        "Run script-policy coverage for default-deny gating, guarded allow and triage proposals, explicit scripts-allow unlock execution, lifecycle order, targeted rebuild, and the current auto-build failure surface.",
         scenario_install_script_policy,
     ),
     "install-save-policy": (
@@ -19686,9 +22403,25 @@ SCENARIOS = {
         "Run the nested package-boundary workspace smoke and assert nested child imports stay isolated.",
         scenario_workspace_nested_boundary,
     ),
+    "workspace-cycles": (
+        "Run workspace cycle coverage for pure A->B->A installs plus the current default-path external registry re-entry linker failure without registry leakage.",
+        scenario_workspace_cycles,
+    ),
+    "workspace-rollback": (
+        "Run workspace self-dependency rollback coverage and assert the install aborts before any member lockfiles or self-links are written.",
+        scenario_workspace_rollback,
+    ),
     "workspace-targeting": (
         "Run filtered workspace installs and assert app-only targets mutate while unmatched filters fail.",
         scenario_workspace_targeting,
+    ),
+    "workspace-json": (
+        "Run multi-member workspace install JSON coverage and assert the filtered install streams one envelope per targeted member without showing the confirmation prompt.",
+        scenario_workspace_json,
+    ),
+    "workspace-interactive-cancel": (
+        "Run the interactive multi-member workspace install decline path and assert the prompt aborts before any manifest mutation.",
+        scenario_workspace_interactive_cancel,
     ),
     "workspace-filter-controls": (
         "Run workspace-filter control coverage for --filter-prod, --no-bail, and --workspace-concurrency.",
@@ -19721,6 +22454,10 @@ SCENARIOS = {
     "install-uninstall": (
         "Run local uninstall coverage for dependency cleanup while leaving peer, optional, and trusted deps untouched.",
         scenario_install_uninstall,
+    ),
+    "install-uninstall-local-bin-cleanup": (
+        "Run scoped uninstall coverage for owned local .bin shim cleanup while preserving unrelated shims.",
+        scenario_install_uninstall_local_bin_cleanup,
     ),
 }
 

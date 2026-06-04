@@ -1,0 +1,8 @@
+{
+    "name": "optional-deps-platform-skip-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "optional-platform-root": "^1.0.0"
+    }
+}

@@ -1,0 +1,8 @@
+{
+    "name": "workspace-cycle-app",
+    "private": true,
+    "version": "1.0.0",
+    "dependencies": {
+        "@smoke/cycle-a": "workspace:*"
+    }
+}

@@ -1,0 +1,8 @@
+{
+    "name": "@smoke/cycle-b",
+    "version": "1.0.0",
+    "main": "index.js",
+    "dependencies": {
+        "@smoke/cycle-a": "workspace:*"
+    }
+}

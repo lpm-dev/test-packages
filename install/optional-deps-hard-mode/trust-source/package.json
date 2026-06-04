@@ -1,0 +1,8 @@
+{
+    "name": "optional-deps-trust-source-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "dependencies": {
+        "optional-build-fail": "^1.0.0"
+    }
+}

@@ -1,0 +1,8 @@
+{
+  "name": "scoped-install-upgrade-smoke",
+  "private": true,
+  "version": "0.0.0",
+  "dependencies": {
+    "@smoke/scoped-lib": "1.2.0"
+  }
+}
