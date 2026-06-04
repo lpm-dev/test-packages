@@ -1183,16 +1183,26 @@ class LocalRegistryRequestHandler(BaseHTTPRequestHandler):
             body = self.rfile.read(content_length)
         self._serve_route(include_body=True, request_body=body)
 
+    def do_DELETE(self) -> None:
+        content_length = int(self.headers.get("Content-Length", "0"))
+        body = b""
+        if content_length > 0:
+            body = self.rfile.read(content_length)
+        self._serve_route(include_body=True, request_body=body)
+
     def log_message(self, format: str, *args: object) -> None:
         return
 
     def _serve_route(self, include_body: bool, request_body: bytes = b"") -> None:
-        path = unquote(self.path.split("?", 1)[0])
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
         self.server.request_log.append((self.command, path))
         self.server.request_details.append(
             {
                 "method": self.command,
                 "path": path,
+                "raw_path": self.path,
+                "query": parse_qs(parsed.query, keep_blank_values=True),
                 "headers": {key.lower(): value for key, value in self.headers.items()},
                 "body": request_body,
             }
@@ -1261,6 +1271,7 @@ class MockRegistry:
         accept_publish_put: bool = False,
         publish_response: dict[str, object] | None = None,
         extra_routes: dict[str, tuple[str, bytes]] | None = None,
+        extra_method_routes: dict[tuple[str, str], tuple[int, str, bytes]] | None = None,
     ):
         self._packages = packages
         self._serve_proxy_metadata = serve_proxy_metadata
@@ -1271,6 +1282,7 @@ class MockRegistry:
         self._accept_publish_put = accept_publish_put
         self._publish_response = publish_response
         self._extra_routes = dict(extra_routes or {})
+        self._extra_method_routes = dict(extra_method_routes or {})
         self._server: LocalRegistryServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -1404,6 +1416,7 @@ class MockRegistry:
                 "application/json",
                 json.dumps(self._revoke_token_response, separators=(",", ":")).encode("utf-8"),
             )
+        routes.update(self._extra_method_routes)
         return routes
 
     def requested_paths(self) -> list[str]:
@@ -1651,16 +1664,20 @@ def home_root_for_lpm_home(lpm_home: str | Path) -> str:
     return str(lpm_home_path)
 
 
-def merged_env(extra: dict[str, str] | None = None) -> dict[str, str]:
+def merged_env(extra: dict[str, str | None] | None = None) -> dict[str, str]:
     env = os.environ.copy()
     env.update(DEFAULT_ENV)
     if extra:
         normalized = dict(extra)
-        if "HOME" not in normalized and "LPM_HOME" in normalized:
+        if "HOME" not in normalized and normalized.get("LPM_HOME") is not None:
             normalized["HOME"] = home_root_for_lpm_home(normalized["LPM_HOME"])
-        if "LPM_HOME" not in normalized and "HOME" in normalized:
+        if "LPM_HOME" not in normalized and normalized.get("HOME") is not None:
             normalized["LPM_HOME"] = smoke_home_path(normalized["HOME"])
-        env.update(normalized)
+        for key, value in normalized.items():
+            if value is None:
+                env.pop(key, None)
+            else:
+                env[key] = value
     return env
 
 
@@ -3408,7 +3425,7 @@ def run_command_result(
     label: str,
     cwd: Path,
     args: list[str],
-    extra_env: dict[str, str] | None = None,
+    extra_env: dict[str, str | None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     log(f"{label}: {' '.join(args)}")
     result = subprocess.run(
@@ -3427,7 +3444,12 @@ def run_command_result(
     return result
 
 
-def run_command(label: str, cwd: Path, args: list[str], extra_env: dict[str, str] | None = None) -> str:
+def run_command(
+    label: str,
+    cwd: Path,
+    args: list[str],
+    extra_env: dict[str, str | None] | None = None,
+) -> str:
     result = run_command_result(label, cwd, args, extra_env=extra_env)
 
     combined = result.stdout + result.stderr
@@ -3440,7 +3462,7 @@ def run_command_expect_failure(
     label: str,
     cwd: Path,
     args: list[str],
-    extra_env: dict[str, str] | None = None,
+    extra_env: dict[str, str | None] | None = None,
 ) -> str:
     result = run_command_result(label, cwd, args, extra_env=extra_env)
 
@@ -3455,7 +3477,7 @@ def run_interactive_command_result(
     cwd: Path,
     args: list[str],
     prompts: list[tuple[str, str]],
-    extra_env: dict[str, str] | None = None,
+    extra_env: dict[str, str | None] | None = None,
     timeout_seconds: int = 600,
 ) -> tuple[str, int]:
     log(f"{label}: {' '.join(args)}")
@@ -19884,6 +19906,47 @@ def scenario_install_publish_command() -> None:
                 )
             return json.loads(extracted.read().decode("utf-8"))
 
+    def encode_json(payload: dict[str, object]) -> bytes:
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def write_publish_npm_config(
+        project_path: Path,
+        *,
+        registry: str | None = None,
+        extra_npm_config: dict[str, object] | None = None,
+    ) -> None:
+        npm_config: dict[str, object] = {}
+        if registry is not None:
+            npm_config["registry"] = registry
+        if extra_npm_config:
+            npm_config.update(extra_npm_config)
+        project_path.joinpath("lpm.json").write_text(
+            json.dumps({"publish": {"npm": npm_config}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def publish_auth_env(
+        base_env: dict[str, str],
+        *,
+        npm_token: str | None = None,
+        npm_id_token: str | None = None,
+        actions_id_token_request_url: str | None = None,
+        actions_id_token_request_token: str | None = None,
+    ) -> dict[str, str | None]:
+        return {
+            **base_env,
+            "NPM_TOKEN": npm_token,
+            "NPM_ID_TOKEN": npm_id_token,
+            "ACTIONS_ID_TOKEN_REQUEST_URL": actions_id_token_request_url,
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": actions_id_token_request_token,
+        }
+
+    npm_id_token = "publish-oidc-id-token"
+    oidc_npm_token = "publish-oidc-exchanged-token"
+    github_runtime_request_token = "publish-gha-request-token"
+    github_runtime_jwt = "publish-gha-id-token"
+    fallback_npm_token = "publish-fallback-token"
+
     with tempfile.TemporaryDirectory(prefix="lpm-publish-home-") as home_root:
         common_env = smoke_home_env(
             home_root,
@@ -20115,6 +20178,282 @@ def scenario_install_publish_command() -> None:
                         f"install/publish {provider} dry run json: expected a target with registry={provider}"
                     )
 
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-npm-dry-run-") as npm_dry_run_project, MockRegistry(
+            []
+        ) as registry:
+            npm_dry_run_path = Path(npm_dry_run_project)
+            write_publish_package(npm_dry_run_path, "npm-dry-run-oidc-pkg")
+            registry_base = registry.registry_url.rstrip("/")
+            write_publish_npm_config(npm_dry_run_path, registry=registry_base)
+            npm_dry_run_result = run_command_result(
+                "install/publish npm dry run json",
+                npm_dry_run_path,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "publish",
+                    "--dry-run",
+                    "--yes",
+                    "--npm",
+                ],
+                extra_env=publish_auth_env(common_env, npm_id_token=npm_id_token),
+            )
+            if npm_dry_run_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/publish npm dry run json failed with exit code "
+                    f"{npm_dry_run_result.returncode}"
+                )
+            npm_dry_run_envelope = parse_json_stdout(
+                "install/publish npm dry run json",
+                npm_dry_run_result,
+            )
+            if npm_dry_run_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/publish npm dry run json: expected success=true"
+                )
+            if npm_dry_run_envelope.get("dry_run") is not True:
+                raise SmokeFailure(
+                    "install/publish npm dry run json: expected dry_run=true"
+                )
+            if registry.request_details():
+                raise SmokeFailure(
+                    "install/publish npm dry run json: expected no registry requests during dry run"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-oidc-runtime-") as oidc_runtime_project, MockRegistry(
+            [],
+            extra_method_routes={
+                ("GET", "/actions/oidc"): (
+                    200,
+                    "application/json",
+                    encode_json({"value": github_runtime_jwt}),
+                ),
+                ("POST", "/-/npm/v1/oidc/token/exchange/package/oidc-runtime-publish-pkg"): (
+                    201,
+                    "application/json",
+                    encode_json(
+                        {
+                            "token_type": "oidc",
+                            "token": oidc_npm_token,
+                        }
+                    ),
+                ),
+                ("PUT", "/oidc-runtime-publish-pkg"): (
+                    201,
+                    "application/json",
+                    encode_json({}),
+                ),
+            },
+        ) as registry:
+            oidc_runtime_path = Path(oidc_runtime_project)
+            write_publish_package(oidc_runtime_path, "oidc-runtime-publish-pkg")
+            registry_base = registry.registry_url.rstrip("/")
+            write_publish_npm_config(oidc_runtime_path, registry=registry_base)
+            oidc_runtime_result = run_command_result(
+                "install/publish npm oidc via github runtime",
+                oidc_runtime_path,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "publish",
+                    "--npm",
+                    "--yes",
+                ],
+                extra_env=publish_auth_env(
+                    common_env,
+                    actions_id_token_request_url=f"{registry_base}/actions/oidc?existing=1",
+                    actions_id_token_request_token=github_runtime_request_token,
+                ),
+            )
+            if oidc_runtime_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime failed with exit code "
+                    f"{oidc_runtime_result.returncode}"
+                )
+            oidc_runtime_envelope = parse_json_stdout(
+                "install/publish npm oidc via github runtime",
+                oidc_runtime_result,
+            )
+            if oidc_runtime_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected success=true"
+                )
+            results = oidc_runtime_envelope.get("results")
+            if not isinstance(results, list) or len(results) != 1:
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected one publish result"
+                )
+            if results[0].get("registry") != "npm":
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected registry='npm'"
+                )
+            if results[0].get("auth") != "oidc":
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected auth='oidc'"
+                )
+
+            runtime_requests = registry.request_details(method="GET", path="/actions/oidc")
+            if len(runtime_requests) != 1:
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected one GitHub runtime token request"
+                )
+            runtime_headers = runtime_requests[0].get("headers", {})
+            if (
+                not isinstance(runtime_headers, dict)
+                or runtime_headers.get("authorization")
+                != f"Bearer {github_runtime_request_token}"
+            ):
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected the GitHub runtime bearer token"
+                )
+            runtime_query = runtime_requests[0].get("query")
+            if not isinstance(runtime_query, dict):
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected parsed runtime query parameters"
+                )
+            if runtime_query.get("existing") != ["1"]:
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected the original runtime query to be preserved"
+                )
+            if runtime_query.get("audience") != ["npm:registry.npmjs.org"]:
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected audience=npm:registry.npmjs.org on the runtime fetch"
+                )
+
+            exchange_requests = registry.request_details(
+                method="POST",
+                path="/-/npm/v1/oidc/token/exchange/package/oidc-runtime-publish-pkg",
+            )
+            if len(exchange_requests) != 1:
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected one npm OIDC exchange request"
+                )
+            exchange_headers = exchange_requests[0].get("headers", {})
+            if (
+                not isinstance(exchange_headers, dict)
+                or exchange_headers.get("authorization") != f"Bearer {github_runtime_jwt}"
+            ):
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected the fetched GitHub runtime JWT on the exchange request"
+                )
+
+            publish_requests = registry.request_details(
+                method="PUT",
+                path="/oidc-runtime-publish-pkg",
+            )
+            if len(publish_requests) != 1:
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected one npm publish upload request"
+                )
+            publish_headers = publish_requests[0].get("headers", {})
+            if (
+                not isinstance(publish_headers, dict)
+                or publish_headers.get("authorization") != f"Bearer {oidc_npm_token}"
+            ):
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected the exchanged npm token on the upload request"
+                )
+            if publish_headers.get("npm-command") != "publish":
+                raise SmokeFailure(
+                    "install/publish npm oidc via github runtime: expected npm-command=publish on the upload request"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-publish-oidc-fallback-") as oidc_fallback_project, MockRegistry(
+            [],
+            extra_method_routes={
+                ("POST", "/-/npm/v1/oidc/token/exchange/package/oidc-fallback-publish-pkg"): (
+                    500,
+                    "application/json",
+                    encode_json({"message": "oidc exchange rejected"}),
+                ),
+                ("PUT", "/oidc-fallback-publish-pkg"): (
+                    201,
+                    "application/json",
+                    encode_json({}),
+                ),
+            },
+        ) as registry:
+            oidc_fallback_path = Path(oidc_fallback_project)
+            write_publish_package(oidc_fallback_path, "oidc-fallback-publish-pkg")
+            registry_base = registry.registry_url.rstrip("/")
+            write_publish_npm_config(oidc_fallback_path, registry=registry_base)
+            oidc_fallback_result = run_command_result(
+                "install/publish npm oidc fallback to token",
+                oidc_fallback_path,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "publish",
+                    "--npm",
+                    "--yes",
+                ],
+                extra_env=publish_auth_env(
+                    common_env,
+                    npm_token=fallback_npm_token,
+                    npm_id_token=npm_id_token,
+                ),
+            )
+            if oidc_fallback_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/publish npm oidc fallback to token failed with exit code "
+                    f"{oidc_fallback_result.returncode}"
+                )
+            oidc_fallback_envelope = parse_json_stdout(
+                "install/publish npm oidc fallback to token",
+                oidc_fallback_result,
+            )
+            if oidc_fallback_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/publish npm oidc fallback to token: expected success=true"
+                )
+            results = oidc_fallback_envelope.get("results")
+            if not isinstance(results, list) or len(results) != 1:
+                raise SmokeFailure(
+                    "install/publish npm oidc fallback to token: expected one publish result"
+                )
+            if results[0].get("registry") != "npm":
+                raise SmokeFailure(
+                    "install/publish npm oidc fallback to token: expected registry='npm'"
+                )
+            if results[0].get("auth") != "token":
+                raise SmokeFailure(
+                    "install/publish npm oidc fallback to token: expected auth='token'"
+                )
+
+            exchange_requests = registry.request_details(
+                method="POST",
+                path="/-/npm/v1/oidc/token/exchange/package/oidc-fallback-publish-pkg",
+            )
+            if len(exchange_requests) != 1:
+                raise SmokeFailure(
+                    "install/publish npm oidc fallback to token: expected one npm OIDC exchange request"
+                )
+            exchange_headers = exchange_requests[0].get("headers", {})
+            if (
+                not isinstance(exchange_headers, dict)
+                or exchange_headers.get("authorization") != f"Bearer {npm_id_token}"
+            ):
+                raise SmokeFailure(
+                    "install/publish npm oidc fallback to token: expected the NPM_ID_TOKEN bearer on the exchange request"
+                )
+
+            publish_requests = registry.request_details(
+                method="PUT",
+                path="/oidc-fallback-publish-pkg",
+            )
+            if len(publish_requests) != 1:
+                raise SmokeFailure(
+                    "install/publish npm oidc fallback to token: expected one npm publish upload request"
+                )
+            publish_headers = publish_requests[0].get("headers", {})
+            if (
+                not isinstance(publish_headers, dict)
+                or publish_headers.get("authorization") != f"Bearer {fallback_npm_token}"
+            ):
+                raise SmokeFailure(
+                    "install/publish npm oidc fallback to token: expected the fallback npm token on the upload request"
+                )
+
         whoami_response = {
             "username": "test@example.com",
             "profile_username": "testuser",
@@ -20276,6 +20615,1079 @@ def scenario_install_publish_command() -> None:
                 raise SmokeFailure(
                     "install/publish catalog rewrite: expected the uploaded manifest to omit catalog: references"
                 )
+
+
+def scenario_install_stage_command() -> None:
+    stage_id = "123e4567-e89b-12d3-a456-426614174000"
+    npm_name = "@scope/staged-pkg"
+    source_name = "@lpm.dev/testuser.staged-pkg"
+    env_token = "stage-env-token"
+    npmrc_token = "stage-npmrc-token"
+    stored_token = "stage-stored-token"
+    oidc_id_token = "stage-oidc-id-token"
+    oidc_npm_token = "stage-oidc-exchanged-token"
+    fallback_token = "stage-fallback-token"
+
+    def encode_json(payload: dict[str, object]) -> bytes:
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def write_stage_project(
+        project_path: Path,
+        *,
+        version: str = "1.0.0",
+        publish_npm_config: dict[str, object] | None = None,
+        extra_manifest: dict[str, object] | None = None,
+    ) -> None:
+        manifest = {
+            "name": source_name,
+            "version": version,
+            "description": "Smoke staged publish package",
+            "main": "index.js",
+            "license": "MIT",
+        }
+        if extra_manifest:
+            manifest.update(extra_manifest)
+        project_path.mkdir(parents=True, exist_ok=True)
+        project_path.joinpath("package.json").write_text(
+            json.dumps(manifest, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        project_path.joinpath("index.js").write_text(
+            "module.exports = { stage: true }\n",
+            encoding="utf-8",
+        )
+        project_path.joinpath("README.md").write_text(
+            "# Stage Smoke\n\nA staged publish smoke package.\n",
+            encoding="utf-8",
+        )
+        npm_config = {"name": npm_name}
+        if publish_npm_config:
+            npm_config.update(publish_npm_config)
+        project_path.joinpath("lpm.json").write_text(
+            json.dumps({"publish": {"npm": npm_config}}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+    def extract_uploaded_package_json(request_body: bytes) -> dict[str, object]:
+        payload = json.loads(request_body)
+        attachments = payload.get("_attachments")
+        if not isinstance(attachments, dict) or not attachments:
+            raise SmokeFailure(
+                "install/stage uploaded tarball: expected one attachment in the stage payload"
+            )
+        attachment = next(iter(attachments.values()))
+        if not isinstance(attachment, dict) or not isinstance(attachment.get("data"), str):
+            raise SmokeFailure(
+                "install/stage uploaded tarball: expected base64 attachment data"
+            )
+        tarball_data = base64.b64decode(attachment["data"])
+        with tarfile.open(fileobj=io.BytesIO(tarball_data), mode="r:gz") as archive:
+            manifest_member = next(
+                (
+                    member
+                    for member in archive.getmembers()
+                    if member.isfile()
+                    and (member.name == "package/package.json" or member.name.endswith("/package.json"))
+                ),
+                None,
+            )
+            if manifest_member is None:
+                raise SmokeFailure(
+                    "install/stage uploaded tarball: expected package/package.json inside the archive"
+                )
+            extracted = archive.extractfile(manifest_member)
+            if extracted is None:
+                raise SmokeFailure(
+                    "install/stage uploaded tarball: failed to extract package/package.json"
+                )
+            return json.loads(extracted.read().decode("utf-8"))
+
+    def make_stage_item(*, tag: str = "next") -> dict[str, object]:
+        return {
+            "id": stage_id,
+            "packageName": npm_name,
+            "version": "1.0.0",
+            "tag": tag,
+            "createdAt": "2026-06-04T00:00:00.000Z",
+            "actor": "testuser",
+            "actorType": "user",
+            "shasum": "abc123",
+        }
+
+    def make_registry_package(*versions: str) -> dict[str, object]:
+        if not versions:
+            raise SmokeFailure("install/stage registry package: expected at least one version")
+        return {
+            "name": npm_name,
+            "dist_tags": {"latest": versions[-1]},
+            "versions": {version: {} for version in versions},
+        }
+
+    def build_stage_registry(
+        packages: list[dict[str, object]],
+        *,
+        publish_body: dict[str, object] | None = None,
+        oidc_exchange_status: int | None = None,
+        oidc_exchange_body: dict[str, object] | None = None,
+        list_items: list[dict[str, object]] | None = None,
+        view_item: dict[str, object] | None = None,
+        approve_body: dict[str, object] | None = None,
+        reject_body: dict[str, object] | None = None,
+        download_tarball: bytes | None = None,
+    ) -> MockRegistry:
+        extra_routes: dict[str, tuple[str, bytes]] = {}
+        if list_items is not None:
+            extra_routes["/-/stage"] = (
+                "application/json",
+                encode_json({"items": list_items, "total": len(list_items)}),
+            )
+        if view_item is not None:
+            extra_routes[f"/-/stage/{stage_id}"] = ("application/json", encode_json(view_item))
+        if download_tarball is not None:
+            extra_routes[f"/-/stage/{stage_id}/tarball"] = (
+                "application/octet-stream",
+                download_tarball,
+            )
+
+        extra_method_routes: dict[tuple[str, str], tuple[int, str, bytes]] = {}
+        if publish_body is not None:
+            extra_method_routes[("POST", f"/-/stage/package/{npm_name}")] = (
+                200,
+                "application/json",
+                encode_json(publish_body),
+            )
+        if oidc_exchange_status is not None:
+            extra_method_routes[
+                ("POST", f"/-/npm/v1/oidc/token/exchange/package/{npm_name}")
+            ] = (
+                oidc_exchange_status,
+                "application/json",
+                encode_json(oidc_exchange_body or {}),
+            )
+        if approve_body is not None:
+            extra_method_routes[("POST", f"/-/stage/{stage_id}/approve")] = (
+                200,
+                "application/json",
+                encode_json(approve_body),
+            )
+        if reject_body is not None:
+            extra_method_routes[("DELETE", f"/-/stage/{stage_id}")] = (
+                200,
+                "application/json",
+                encode_json(reject_body),
+            )
+
+        return MockRegistry(
+            packages,
+            extra_routes=extra_routes,
+            extra_method_routes=extra_method_routes,
+        )
+
+    def require_no_stage_upload(registry: MockRegistry, context: str) -> None:
+        if registry.request_details(method="POST", path=f"/-/stage/package/{npm_name}"):
+            raise SmokeFailure(f"{context}: expected no stage upload request")
+
+    def write_locked_npmrc_token(project_path: Path, token: str) -> None:
+        npmrc_path = project_path / ".npmrc"
+        npmrc_path.write_text(
+            f"//registry.npmjs.org/:_authToken={token}\nregistry=https://registry.npmjs.org/\n",
+            encoding="utf-8",
+        )
+        if os.name != "nt":
+            npmrc_path.chmod(0o600)
+
+    def stage_auth_env(
+        base_env: dict[str, str],
+        *,
+        npm_token: str | None = None,
+        npm_id_token: str | None = None,
+        actions_id_token_request_url: str | None = None,
+        actions_id_token_request_token: str | None = None,
+    ) -> dict[str, str | None]:
+        return {
+            **base_env,
+            "NPM_TOKEN": npm_token,
+            "NPM_ID_TOKEN": npm_id_token,
+            "ACTIONS_ID_TOKEN_REQUEST_URL": actions_id_token_request_url,
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": actions_id_token_request_token,
+        }
+
+    with tempfile.TemporaryDirectory(prefix="lpm-stage-home-") as home_root:
+        common_env = smoke_home_env(
+            home_root,
+            LPM_FORCE_FILE_AUTH="1",
+            LPM_TEST_FAST_SCRYPT="1",
+        )
+
+        with build_stage_registry([]) as registry, tempfile.TemporaryDirectory(
+            prefix="lpm-stage-dry-run-"
+        ) as dry_run_project:
+            dry_run_path = Path(dry_run_project)
+            write_stage_project(dry_run_path)
+            registry_base = registry.registry_url.rstrip("/")
+            dry_run_result = run_command_result(
+                "install/stage publish dry run json",
+                dry_run_path,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "stage",
+                    "publish",
+                    "--dry-run",
+                    "--yes",
+                    "--npm-registry",
+                    registry_base,
+                ],
+                extra_env=common_env,
+            )
+            if dry_run_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/stage publish dry run json failed with exit code "
+                    f"{dry_run_result.returncode}"
+                )
+            dry_run_envelope = parse_json_stdout(
+                "install/stage publish dry run json", dry_run_result
+            )
+            if dry_run_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/stage publish dry run json: expected success=true"
+                )
+            if dry_run_envelope.get("dry_run") is not True:
+                raise SmokeFailure(
+                    "install/stage publish dry run json: expected dry_run=true"
+                )
+            if dry_run_envelope.get("target") != "npm":
+                raise SmokeFailure(
+                    "install/stage publish dry run json: expected target='npm'"
+                )
+            if dry_run_envelope.get("registry") != registry_base:
+                raise SmokeFailure(
+                    "install/stage publish dry run json: expected the stage registry URL"
+                )
+            if registry.request_details():
+                raise SmokeFailure(
+                    "install/stage publish dry run json: expected no registry requests during dry run"
+                )
+
+        with build_stage_registry(
+            [make_registry_package("0.9.0")],
+            publish_body={"stageId": stage_id, "status": "staged"},
+        ) as registry, tempfile.TemporaryDirectory(prefix="lpm-stage-publish-") as publish_project:
+            publish_path = Path(publish_project)
+            write_stage_project(
+                publish_path,
+                publish_npm_config={"access": "restricted", "tag": "next"},
+            )
+            registry_base = registry.registry_url.rstrip("/")
+            publish_result = run_command_result(
+                "install/stage publish json",
+                publish_path,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "stage",
+                    "publish",
+                    "--yes",
+                    "--npm-registry",
+                    registry_base,
+                ],
+                extra_env=stage_auth_env(common_env, npm_token=env_token),
+            )
+            if publish_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/stage publish json failed with exit code {publish_result.returncode}"
+                )
+            publish_envelope = parse_json_stdout("install/stage publish json", publish_result)
+            if publish_envelope.get("success") is not True:
+                raise SmokeFailure("install/stage publish json: expected success=true")
+            if publish_envelope.get("target") != "npm":
+                raise SmokeFailure("install/stage publish json: expected target='npm'")
+            if publish_envelope.get("registry") != registry_base:
+                raise SmokeFailure(
+                    "install/stage publish json: expected the stage registry URL"
+                )
+            if publish_envelope.get("auth") != "token":
+                raise SmokeFailure("install/stage publish json: expected auth='token'")
+            if publish_envelope.get("stageId") != stage_id:
+                raise SmokeFailure("install/stage publish json: expected stageId in the envelope")
+            data = publish_envelope.get("data")
+            if not isinstance(data, dict) or data.get("stageId") != stage_id:
+                raise SmokeFailure(
+                    "install/stage publish json: expected data.stageId from the registry response"
+                )
+
+            metadata_requests = registry.request_details(method="GET", path=f"/{npm_name}")
+            if len(metadata_requests) != 1:
+                raise SmokeFailure(
+                    "install/stage publish json: expected exactly one npm metadata request"
+                )
+            metadata_headers = metadata_requests[0].get("headers", {})
+            if (
+                not isinstance(metadata_headers, dict)
+                or metadata_headers.get("authorization") != f"Bearer {env_token}"
+            ):
+                raise SmokeFailure(
+                    "install/stage publish json: expected the env npm token on the metadata request"
+                )
+            publish_requests = registry.request_details(
+                method="POST", path=f"/-/stage/package/{npm_name}"
+            )
+            if len(publish_requests) != 1:
+                raise SmokeFailure(
+                    "install/stage publish json: expected exactly one stage upload request"
+                )
+            publish_request = publish_requests[0]
+            publish_headers = publish_request.get("headers", {})
+            if not isinstance(publish_headers, dict):
+                raise SmokeFailure(
+                    "install/stage publish json: expected request headers to be recorded"
+                )
+            if publish_headers.get("authorization") != f"Bearer {env_token}":
+                raise SmokeFailure(
+                    "install/stage publish json: expected the env npm token in the Authorization header"
+                )
+            if publish_headers.get("npm-command") != "stage":
+                raise SmokeFailure(
+                    "install/stage publish json: expected npm-command=stage on the upload request"
+                )
+            if "npm-otp" in publish_headers:
+                raise SmokeFailure(
+                    "install/stage publish json: did not expect npm-otp on stage publish"
+                )
+
+            upload_payload = json.loads(publish_request["body"])
+            if upload_payload.get("_id") != npm_name:
+                raise SmokeFailure(
+                    "install/stage publish json: expected npm name rewrite in the stage payload"
+                )
+            if upload_payload.get("access") != "restricted":
+                raise SmokeFailure(
+                    "install/stage publish json: expected npm access from lpm.json in the stage payload"
+                )
+            dist_tags = upload_payload.get("dist-tags")
+            if not isinstance(dist_tags, dict) or dist_tags.get("next") != "1.0.0":
+                raise SmokeFailure(
+                    "install/stage publish json: expected npm tag routing in the stage payload"
+                )
+            attachments = upload_payload.get("_attachments")
+            expected_attachment = f"{npm_name}-1.0.0.tgz"
+            if not isinstance(attachments, dict) or expected_attachment not in attachments:
+                raise SmokeFailure(
+                    "install/stage publish json: expected the rewritten npm tarball attachment key"
+                )
+            uploaded_manifest = extract_uploaded_package_json(publish_request["body"])
+            if uploaded_manifest.get("name") != npm_name:
+                raise SmokeFailure(
+                    "install/stage publish json: expected the uploaded tarball manifest to use the npm package name"
+                )
+            if any(
+                isinstance(row.get("path"), str) and row["path"].startswith("/api/registry/")
+                for row in registry.request_details()
+            ):
+                raise SmokeFailure(
+                    "install/stage publish json: expected npm staging routes instead of lpm publish routes"
+                )
+
+        with build_stage_registry(
+            [make_registry_package("0.9.0")],
+            publish_body={"stageId": stage_id, "status": "staged"},
+            oidc_exchange_status=201,
+            oidc_exchange_body={"token_type": "oidc", "token": oidc_npm_token},
+        ) as registry, tempfile.TemporaryDirectory(prefix="lpm-stage-oidc-publish-") as oidc_publish_project:
+            oidc_publish_path = Path(oidc_publish_project)
+            write_stage_project(oidc_publish_path)
+            registry_base = registry.registry_url.rstrip("/")
+            oidc_publish_result = run_command_result(
+                "install/stage publish json via oidc",
+                oidc_publish_path,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "stage",
+                    "publish",
+                    "--yes",
+                    "--npm-registry",
+                    registry_base,
+                ],
+                extra_env=stage_auth_env(common_env, npm_id_token=oidc_id_token),
+            )
+            if oidc_publish_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc failed with exit code "
+                    f"{oidc_publish_result.returncode}"
+                )
+            oidc_publish_envelope = parse_json_stdout(
+                "install/stage publish json via oidc",
+                oidc_publish_result,
+            )
+            if oidc_publish_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc: expected success=true"
+                )
+            if oidc_publish_envelope.get("auth") != "oidc":
+                raise SmokeFailure(
+                    "install/stage publish json via oidc: expected auth='oidc'"
+                )
+            if oidc_publish_envelope.get("stageId") != stage_id:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc: expected stageId in the envelope"
+                )
+
+            exchange_requests = registry.request_details(
+                method="POST",
+                path=f"/-/npm/v1/oidc/token/exchange/package/{npm_name}",
+            )
+            if len(exchange_requests) != 1:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc: expected exactly one npm OIDC exchange request"
+                )
+            exchange_headers = exchange_requests[0].get("headers", {})
+            if (
+                not isinstance(exchange_headers, dict)
+                or exchange_headers.get("authorization") != f"Bearer {oidc_id_token}"
+            ):
+                raise SmokeFailure(
+                    "install/stage publish json via oidc: expected the NPM_ID_TOKEN bearer on the exchange request"
+                )
+
+            metadata_requests = registry.request_details(method="GET", path=f"/{npm_name}")
+            if len(metadata_requests) != 1:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc: expected exactly one npm metadata request"
+                )
+            metadata_headers = metadata_requests[0].get("headers", {})
+            if (
+                not isinstance(metadata_headers, dict)
+                or metadata_headers.get("authorization") != f"Bearer {oidc_npm_token}"
+            ):
+                raise SmokeFailure(
+                    "install/stage publish json via oidc: expected the exchanged npm token on the metadata request"
+                )
+
+            publish_requests = registry.request_details(
+                method="POST", path=f"/-/stage/package/{npm_name}"
+            )
+            if len(publish_requests) != 1:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc: expected exactly one stage upload request"
+                )
+            publish_headers = publish_requests[0].get("headers", {})
+            if (
+                not isinstance(publish_headers, dict)
+                or publish_headers.get("authorization") != f"Bearer {oidc_npm_token}"
+            ):
+                raise SmokeFailure(
+                    "install/stage publish json via oidc: expected the exchanged npm token on the upload request"
+                )
+
+        with build_stage_registry(
+            [make_registry_package("0.9.0")],
+            publish_body={"stageId": stage_id, "status": "staged"},
+            oidc_exchange_status=500,
+            oidc_exchange_body={"message": "oidc exchange rejected"},
+        ) as registry, tempfile.TemporaryDirectory(prefix="lpm-stage-oidc-fallback-") as oidc_fallback_project:
+            oidc_fallback_path = Path(oidc_fallback_project)
+            write_stage_project(oidc_fallback_path)
+            registry_base = registry.registry_url.rstrip("/")
+            oidc_fallback_result = run_command_result(
+                "install/stage publish json via oidc fallback",
+                oidc_fallback_path,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "stage",
+                    "publish",
+                    "--yes",
+                    "--npm-registry",
+                    registry_base,
+                ],
+                extra_env=stage_auth_env(
+                    common_env,
+                    npm_token=fallback_token,
+                    npm_id_token=oidc_id_token,
+                ),
+            )
+            if oidc_fallback_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc fallback failed with exit code "
+                    f"{oidc_fallback_result.returncode}"
+                )
+            oidc_fallback_envelope = parse_json_stdout(
+                "install/stage publish json via oidc fallback",
+                oidc_fallback_result,
+            )
+            if oidc_fallback_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc fallback: expected success=true"
+                )
+            if oidc_fallback_envelope.get("auth") != "token":
+                raise SmokeFailure(
+                    "install/stage publish json via oidc fallback: expected auth='token'"
+                )
+            if oidc_fallback_envelope.get("stageId") != stage_id:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc fallback: expected stageId in the envelope"
+                )
+
+            exchange_requests = registry.request_details(
+                method="POST",
+                path=f"/-/npm/v1/oidc/token/exchange/package/{npm_name}",
+            )
+            if len(exchange_requests) != 1:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc fallback: expected exactly one npm OIDC exchange request"
+                )
+            exchange_headers = exchange_requests[0].get("headers", {})
+            if (
+                not isinstance(exchange_headers, dict)
+                or exchange_headers.get("authorization") != f"Bearer {oidc_id_token}"
+            ):
+                raise SmokeFailure(
+                    "install/stage publish json via oidc fallback: expected the NPM_ID_TOKEN bearer on the exchange request"
+                )
+
+            metadata_requests = registry.request_details(method="GET", path=f"/{npm_name}")
+            if len(metadata_requests) != 1:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc fallback: expected exactly one npm metadata request"
+                )
+            metadata_headers = metadata_requests[0].get("headers", {})
+            if (
+                not isinstance(metadata_headers, dict)
+                or metadata_headers.get("authorization") != f"Bearer {fallback_token}"
+            ):
+                raise SmokeFailure(
+                    "install/stage publish json via oidc fallback: expected the fallback npm token on the metadata request"
+                )
+
+            publish_requests = registry.request_details(
+                method="POST", path=f"/-/stage/package/{npm_name}"
+            )
+            if len(publish_requests) != 1:
+                raise SmokeFailure(
+                    "install/stage publish json via oidc fallback: expected exactly one stage upload request"
+                )
+            publish_headers = publish_requests[0].get("headers", {})
+            if (
+                not isinstance(publish_headers, dict)
+                or publish_headers.get("authorization") != f"Bearer {fallback_token}"
+            ):
+                raise SmokeFailure(
+                    "install/stage publish json via oidc fallback: expected the fallback npm token on the upload request"
+                )
+
+        with build_stage_registry([]) as registry, tempfile.TemporaryDirectory(
+            prefix="lpm-stage-missing-package-"
+        ) as missing_package_project:
+            missing_package_path = Path(missing_package_project)
+            write_stage_project(missing_package_path)
+            missing_output = run_command_expect_failure(
+                "install/stage publish requires existing package",
+                missing_package_path,
+                [
+                    str(LPM_BIN),
+                    "stage",
+                    "publish",
+                    "--yes",
+                    "--npm-registry",
+                    registry.registry_url.rstrip("/"),
+                ],
+                extra_env=stage_auth_env(common_env, npm_token=env_token),
+            )
+            require_contains(
+                missing_output,
+                f"requires {npm_name} to already exist",
+                "install/stage publish requires existing package guidance",
+            )
+            require_no_stage_upload(
+                registry,
+                "install/stage publish requires existing package",
+            )
+
+        with build_stage_registry([make_registry_package("1.0.0")]) as registry, tempfile.TemporaryDirectory(
+            prefix="lpm-stage-duplicate-version-"
+        ) as duplicate_version_project:
+            duplicate_version_path = Path(duplicate_version_project)
+            write_stage_project(duplicate_version_path)
+            duplicate_output = run_command_expect_failure(
+                "install/stage publish duplicate version",
+                duplicate_version_path,
+                [
+                    str(LPM_BIN),
+                    "stage",
+                    "publish",
+                    "--yes",
+                    "--npm-registry",
+                    registry.registry_url.rstrip("/"),
+                ],
+                extra_env=stage_auth_env(common_env, npm_token=env_token),
+            )
+            require_contains(
+                duplicate_output,
+                "version 1.0.0 already exists on npm",
+                "install/stage publish duplicate version guidance",
+            )
+            require_no_stage_upload(registry, "install/stage publish duplicate version")
+
+        with build_stage_registry([make_registry_package("1.0.0")]) as registry, tempfile.TemporaryDirectory(
+            prefix="lpm-stage-prerelease-"
+        ) as prerelease_project:
+            prerelease_path = Path(prerelease_project)
+            write_stage_project(prerelease_path, version="1.1.0-beta.1")
+            prerelease_output = run_command_expect_failure(
+                "install/stage publish prerelease requires tag",
+                prerelease_path,
+                [
+                    str(LPM_BIN),
+                    "stage",
+                    "publish",
+                    "--yes",
+                    "--npm-registry",
+                    registry.registry_url.rstrip("/"),
+                ],
+                extra_env=stage_auth_env(common_env, npm_token=env_token),
+            )
+            require_contains(
+                prerelease_output,
+                "--tag",
+                "install/stage publish prerelease requires tag guidance",
+            )
+            require_no_stage_upload(registry, "install/stage publish prerelease requires tag")
+
+        with build_stage_registry([make_registry_package("2.0.0")]) as registry, tempfile.TemporaryDirectory(
+            prefix="lpm-stage-latest-guard-"
+        ) as latest_guard_project:
+            latest_guard_path = Path(latest_guard_project)
+            write_stage_project(latest_guard_path)
+            latest_guard_output = run_command_expect_failure(
+                "install/stage publish implicit latest guard",
+                latest_guard_path,
+                [
+                    str(LPM_BIN),
+                    "stage",
+                    "publish",
+                    "--yes",
+                    "--npm-registry",
+                    registry.registry_url.rstrip("/"),
+                ],
+                extra_env=stage_auth_env(common_env, npm_token=env_token),
+            )
+            require_contains(
+                latest_guard_output,
+                'Cannot implicitly apply the "latest" tag',
+                "install/stage publish implicit latest guard guidance",
+            )
+            require_no_stage_upload(registry, "install/stage publish implicit latest guard")
+
+        with tempfile.TemporaryDirectory(prefix="lpm-stage-registry-flag-") as registry_flag_project:
+            registry_flag_path = Path(registry_flag_project)
+            write_stage_project(registry_flag_path)
+            registry_flag_output = run_command_expect_failure(
+                "install/stage rejects global registry flag",
+                registry_flag_path,
+                [
+                    str(LPM_BIN),
+                    "--registry",
+                    "https://lpm.example.test",
+                    "stage",
+                    "list",
+                ],
+                extra_env=common_env,
+            )
+            require_contains(
+                registry_flag_output,
+                "--npm-registry",
+                "install/stage rejects global registry flag guidance",
+            )
+
+        with build_stage_registry([]) as registry, tempfile.TemporaryDirectory(
+            prefix="lpm-stage-invalid-id-"
+        ) as invalid_id_project:
+            invalid_id_path = Path(invalid_id_project)
+            write_stage_project(invalid_id_path)
+            invalid_id_output = run_command_expect_failure(
+                "install/stage invalid stage id",
+                invalid_id_path,
+                [
+                    str(LPM_BIN),
+                    "stage",
+                    "view",
+                    "not-a-uuid",
+                    "--npm-registry",
+                    registry.registry_url.rstrip("/"),
+                ],
+                extra_env=stage_auth_env(common_env, npm_token=env_token),
+            )
+            require_contains(
+                invalid_id_output,
+                "expected a UUID",
+                "install/stage invalid stage id guidance",
+            )
+            if registry.request_details():
+                raise SmokeFailure(
+                    "install/stage invalid stage id: expected no registry requests before validation fails"
+                )
+
+        with build_stage_registry([]) as registry, tempfile.TemporaryDirectory(
+            prefix="lpm-stage-oidc-list-"
+        ) as oidc_list_project:
+            oidc_list_path = Path(oidc_list_project)
+            write_stage_project(oidc_list_path)
+            oidc_list_output = run_command_expect_failure(
+                "install/stage list requires token when oidc is present",
+                oidc_list_path,
+                [
+                    str(LPM_BIN),
+                    "stage",
+                    "list",
+                    "--npm-registry",
+                    registry.registry_url.rstrip("/"),
+                ],
+                extra_env=stage_auth_env(common_env, npm_id_token=oidc_id_token),
+            )
+            require_contains(
+                oidc_list_output,
+                "no npm token found",
+                "install/stage list requires token when oidc is present guidance",
+            )
+            if registry.request_details():
+                raise SmokeFailure(
+                    "install/stage list requires token when oidc is present: expected no registry requests before auth fails"
+                )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-stage-npmrc-home-") as npmrc_home, tempfile.TemporaryDirectory(
+            prefix="lpm-stage-npmrc-project-"
+        ) as npmrc_project:
+            npmrc_env = smoke_home_env(
+                npmrc_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_TEST_FAST_SCRYPT="1",
+            )
+            npmrc_project_path = Path(npmrc_project)
+            write_stage_project(npmrc_project_path)
+            write_locked_npmrc_token(npmrc_project_path, npmrc_token)
+
+            with build_stage_registry([], list_items=[make_stage_item()]) as registry:
+                npmrc_result = run_command_result(
+                    "install/stage list json via locked npmrc token",
+                    npmrc_project_path,
+                    [
+                        str(LPM_BIN),
+                        "--json",
+                        "stage",
+                        "list",
+                        npm_name,
+                        "--npm-registry",
+                        registry.registry_url.rstrip("/"),
+                    ],
+                    extra_env=stage_auth_env(npmrc_env),
+                )
+                if npmrc_result.returncode != 0:
+                    raise SmokeFailure(
+                        "install/stage list json via locked npmrc token failed with exit code "
+                        f"{npmrc_result.returncode}"
+                    )
+                npmrc_envelope = parse_json_stdout(
+                    "install/stage list json via locked npmrc token",
+                    npmrc_result,
+                )
+                if npmrc_envelope.get("success") is not True:
+                    raise SmokeFailure(
+                        "install/stage list json via locked npmrc token: expected success=true"
+                    )
+                npmrc_requests = registry.request_details(method="GET", path="/-/stage")
+                if len(npmrc_requests) != 1:
+                    raise SmokeFailure(
+                        "install/stage list json via locked npmrc token: expected exactly one list request"
+                    )
+                npmrc_headers = npmrc_requests[0].get("headers", {})
+                if (
+                    not isinstance(npmrc_headers, dict)
+                    or npmrc_headers.get("authorization") != f"Bearer {npmrc_token}"
+                ):
+                    raise SmokeFailure(
+                        "install/stage list json via locked npmrc token: expected the locked .npmrc token in the Authorization header"
+                    )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-stage-stored-home-") as stored_home, tempfile.TemporaryDirectory(
+            prefix="lpm-stage-stored-project-"
+        ) as stored_project:
+            stored_env = smoke_home_env(
+                stored_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_TEST_FAST_SCRYPT="1",
+            )
+            stored_project_path = Path(stored_project)
+            write_stage_project(stored_project_path)
+            login_result = run_command_result(
+                "install/stage login npm env",
+                stored_project_path,
+                [str(LPM_BIN), "--json", "login", "--npm"],
+                extra_env=stage_auth_env(stored_env, npm_token=stored_token),
+            )
+            if login_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/stage login npm env failed with exit code {login_result.returncode}"
+                )
+            login_envelope = parse_json_stdout("install/stage login npm env", login_result)
+            if login_envelope.get("success") is not True or login_envelope.get("stored") is not True:
+                raise SmokeFailure(
+                    "install/stage login npm env: expected success=true and stored=true"
+                )
+
+            list_item = make_stage_item()
+            stage_tarball = build_package_tarball(npm_name, "1.0.0", {}, {})
+            with build_stage_registry(
+                [],
+                list_items=[list_item],
+                view_item=list_item,
+                approve_body={"ok": True},
+                reject_body={"ok": True},
+                download_tarball=stage_tarball,
+            ) as registry:
+                registry_base = registry.registry_url.rstrip("/")
+
+                list_result = run_command_result(
+                    "install/stage list json",
+                    stored_project_path,
+                    [
+                        str(LPM_BIN),
+                        "--json",
+                        "stage",
+                        "list",
+                        npm_name,
+                        "--npm-registry",
+                        registry_base,
+                    ],
+                    extra_env=stage_auth_env(stored_env),
+                )
+                if list_result.returncode != 0:
+                    raise SmokeFailure(
+                        f"install/stage list json failed with exit code {list_result.returncode}"
+                    )
+                list_envelope = parse_json_stdout("install/stage list json", list_result)
+                if list_envelope.get("success") is not True:
+                    raise SmokeFailure("install/stage list json: expected success=true")
+                if list_envelope.get("target") != "npm":
+                    raise SmokeFailure("install/stage list json: expected target='npm'")
+                if list_envelope.get("total") != 1:
+                    raise SmokeFailure("install/stage list json: expected total=1")
+                list_data = list_envelope.get("data")
+                if not isinstance(list_data, list) or len(list_data) != 1:
+                    raise SmokeFailure("install/stage list json: expected one staged package item")
+
+                view_result = run_command_result(
+                    "install/stage view json",
+                    stored_project_path,
+                    [
+                        str(LPM_BIN),
+                        "--json",
+                        "stage",
+                        "view",
+                        stage_id,
+                        "--npm-registry",
+                        registry_base,
+                    ],
+                    extra_env=stage_auth_env(stored_env),
+                )
+                if view_result.returncode != 0:
+                    raise SmokeFailure(
+                        f"install/stage view json failed with exit code {view_result.returncode}"
+                    )
+                view_envelope = parse_json_stdout("install/stage view json", view_result)
+                if view_envelope.get("stageId") != stage_id:
+                    raise SmokeFailure("install/stage view json: expected stageId in the envelope")
+                view_data = view_envelope.get("data")
+                if not isinstance(view_data, dict) or view_data.get("id") != stage_id:
+                    raise SmokeFailure(
+                        "install/stage view json: expected the staged package payload in data"
+                    )
+
+                download_result = run_command_result(
+                    "install/stage download json",
+                    stored_project_path,
+                    [
+                        str(LPM_BIN),
+                        "--json",
+                        "stage",
+                        "download",
+                        stage_id,
+                        "--npm-registry",
+                        registry_base,
+                    ],
+                    extra_env=stage_auth_env(stored_env),
+                )
+                if download_result.returncode != 0:
+                    raise SmokeFailure(
+                        "install/stage download json failed with exit code "
+                        f"{download_result.returncode}"
+                    )
+                download_envelope = parse_json_stdout("install/stage download json", download_result)
+                expected_download_path = stored_project_path / f"scope-staged-pkg-1.0.0-{stage_id}.tgz"
+                require_exists(expected_download_path)
+                if download_envelope.get("stageId") != stage_id:
+                    raise SmokeFailure(
+                        "install/stage download json: expected stageId in the envelope"
+                    )
+                envelope_download_path = Path(str(download_envelope.get("path", "")))
+                if envelope_download_path.resolve() != expected_download_path.resolve():
+                    raise SmokeFailure(
+                        "install/stage download json: expected the canonical downloaded tarball path"
+                    )
+                download_data = download_envelope.get("data")
+                if not isinstance(download_data, dict) or download_data.get("name") != npm_name:
+                    raise SmokeFailure(
+                        "install/stage download json: expected the downloaded manifest in data"
+                    )
+
+                approve_result = run_command_result(
+                    "install/stage approve json",
+                    stored_project_path,
+                    [
+                        str(LPM_BIN),
+                        "--json",
+                        "stage",
+                        "approve",
+                        stage_id,
+                        "--otp",
+                        "123456",
+                        "--npm-registry",
+                        registry_base,
+                    ],
+                    extra_env=stage_auth_env(stored_env),
+                )
+                if approve_result.returncode != 0:
+                    raise SmokeFailure(
+                        f"install/stage approve json failed with exit code {approve_result.returncode}"
+                    )
+                approve_envelope = parse_json_stdout("install/stage approve json", approve_result)
+                if approve_envelope.get("action") != "approved":
+                    raise SmokeFailure(
+                        "install/stage approve json: expected action='approved'"
+                    )
+
+                reject_result = run_command_result(
+                    "install/stage reject json",
+                    stored_project_path,
+                    [
+                        str(LPM_BIN),
+                        "--json",
+                        "stage",
+                        "reject",
+                        stage_id,
+                        "--otp",
+                        "654321",
+                        "--npm-registry",
+                        registry_base,
+                    ],
+                    extra_env=stage_auth_env(stored_env),
+                )
+                if reject_result.returncode != 0:
+                    raise SmokeFailure(
+                        f"install/stage reject json failed with exit code {reject_result.returncode}"
+                    )
+                reject_envelope = parse_json_stdout("install/stage reject json", reject_result)
+                if reject_envelope.get("action") != "rejected":
+                    raise SmokeFailure(
+                        "install/stage reject json: expected action='rejected'"
+                    )
+
+                list_requests = registry.request_details(method="GET", path="/-/stage")
+                if len(list_requests) != 1:
+                    raise SmokeFailure("install/stage list json: expected exactly one list request")
+                list_request = list_requests[0]
+                list_headers = list_request.get("headers", {})
+                if not isinstance(list_headers, dict):
+                    raise SmokeFailure(
+                        "install/stage list json: expected request headers to be recorded"
+                    )
+                if list_headers.get("authorization") != f"Bearer {stored_token}":
+                    raise SmokeFailure(
+                        "install/stage list json: expected the stored npm token in the Authorization header"
+                    )
+                list_query = list_request.get("query")
+                if not isinstance(list_query, dict):
+                    raise SmokeFailure(
+                        "install/stage list json: expected parsed query parameters to be recorded"
+                    )
+                if list_query.get("package") != [npm_name]:
+                    raise SmokeFailure(
+                        "install/stage list json: expected the package filter in the list query"
+                    )
+                if list_query.get("page") != ["0"] or list_query.get("perPage") != ["100"]:
+                    raise SmokeFailure(
+                        "install/stage list json: expected the default list pagination query"
+                    )
+
+                view_requests = registry.request_details(method="GET", path=f"/-/stage/{stage_id}")
+                if len(view_requests) != 1:
+                    raise SmokeFailure("install/stage view json: expected exactly one view request")
+                view_headers = view_requests[0].get("headers", {})
+                if not isinstance(view_headers, dict) or view_headers.get("authorization") != f"Bearer {stored_token}":
+                    raise SmokeFailure(
+                        "install/stage view json: expected the stored npm token in the Authorization header"
+                    )
+                if "npm-otp" in view_headers:
+                    raise SmokeFailure(
+                        "install/stage view json: did not expect npm-otp on the view request"
+                    )
+
+                download_requests = registry.request_details(
+                    method="GET", path=f"/-/stage/{stage_id}/tarball"
+                )
+                if len(download_requests) != 1:
+                    raise SmokeFailure(
+                        "install/stage download json: expected exactly one tarball request"
+                    )
+                download_headers = download_requests[0].get("headers", {})
+                if not isinstance(download_headers, dict) or download_headers.get("authorization") != f"Bearer {stored_token}":
+                    raise SmokeFailure(
+                        "install/stage download json: expected the stored npm token in the Authorization header"
+                    )
+                if "npm-otp" in download_headers:
+                    raise SmokeFailure(
+                        "install/stage download json: did not expect npm-otp on the download request"
+                    )
+
+                approve_requests = registry.request_details(
+                    method="POST", path=f"/-/stage/{stage_id}/approve"
+                )
+                if len(approve_requests) != 1:
+                    raise SmokeFailure(
+                        "install/stage approve json: expected exactly one approve request"
+                    )
+                approve_headers = approve_requests[0].get("headers", {})
+                if (
+                    not isinstance(approve_headers, dict)
+                    or approve_headers.get("authorization") != f"Bearer {stored_token}"
+                ):
+                    raise SmokeFailure(
+                        "install/stage approve json: expected the stored npm token in the Authorization header"
+                    )
+                if approve_headers.get("npm-otp") != "123456":
+                    raise SmokeFailure(
+                        "install/stage approve json: expected npm-otp=123456 on the approve request"
+                    )
+
+                reject_requests = registry.request_details(
+                    method="DELETE", path=f"/-/stage/{stage_id}"
+                )
+                if len(reject_requests) != 1:
+                    raise SmokeFailure(
+                        "install/stage reject json: expected exactly one reject request"
+                    )
+                reject_headers = reject_requests[0].get("headers", {})
+                if (
+                    not isinstance(reject_headers, dict)
+                    or reject_headers.get("authorization") != f"Bearer {stored_token}"
+                ):
+                    raise SmokeFailure(
+                        "install/stage reject json: expected the stored npm token in the Authorization header"
+                    )
+                if reject_headers.get("npm-otp") != "654321":
+                    raise SmokeFailure(
+                        "install/stage reject json: expected npm-otp=654321 on the reject request"
+                    )
 
 
 def scenario_install_node_runtime_command() -> None:
@@ -22230,6 +23642,10 @@ SCENARIOS = {
     "install-publish": (
         "Run lpm publish coverage for dry-run validation, target planning, mock-registry success, and catalog dependency rewrites inside uploaded tarballs.",
         scenario_install_publish_command,
+    ),
+    "install-stage": (
+        "Run lpm stage coverage for npm-only staged publish flow, JSON envelopes, npm-registry routing, dry-run no-network behavior, and staged package safety guards.",
+        scenario_install_stage_command,
     ),
     "install-node-runtime": (
         "Run managed Node runtime coverage for use/list, early validation failures, pin behavior, mocked installs, JSON install envelopes, and version removal.",
