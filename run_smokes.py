@@ -7,6 +7,7 @@ import base64
 from contextlib import contextmanager
 import gzip
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -3197,6 +3198,44 @@ def read_json_file(path: Path) -> dict[str, object]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def write_signed_project_unlock(
+    home_root: str | Path,
+    project_root: str | Path,
+    *,
+    scopes: list[str],
+    ttl_seconds: int = 600,
+) -> None:
+    now = datetime.now(timezone.utc)
+    payload = {
+        "schema_version": 1,
+        "id": f"unl_{time.time_ns()}",
+        "target": "project",
+        "project_root": str(Path(project_root).resolve()),
+        "scopes": scopes,
+        "limits": {},
+        "issued_at": now.isoformat().replace("+00:00", "Z"),
+        "expires_at": (now + timedelta(seconds=ttl_seconds)).isoformat().replace("+00:00", "Z"),
+        "issuer": "user-presence",
+    }
+
+    secret = bytes([42]) * 32
+    security_dir = Path(home_root) / ".lpm" / "security"
+    unlocks_dir = security_dir / "unlocks"
+    unlocks_dir.mkdir(parents=True, exist_ok=True)
+    (security_dir / "signing-secret.hex").write_text(secret.hex(), encoding="utf-8")
+
+    payload_bytes = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    signature = hmac.new(secret, payload_bytes, hashlib.sha256).hexdigest()
+    envelope = {
+        "payload": payload,
+        "signature": signature,
+    }
+    unlocks_dir.joinpath(f"{payload['id']}.json").write_text(
+        json.dumps(envelope, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 def seed_installed_package(project_dir: Path, package_name: str, version: str) -> None:
     package_dir = project_dir / "node_modules" / package_name
     write_package_json(
@@ -3953,24 +3992,24 @@ def scenario_workspace_cycles() -> None:
             [str(LPM_BIN), "install"],
             extra_env=scenario_env,
         )
-        if reentry_result.returncode == 0:
+        if reentry_result.returncode != 0:
             raise SmokeFailure(
-                "workspace/cycles external re-entry install: expected non-zero exit code"
+                f"workspace/cycles external re-entry install failed with exit code {reentry_result.returncode}"
             )
-        require_contains(
-            reentry_result.stdout + reentry_result.stderr,
-            "@smoke/cycle-b",
-            "workspace/cycles external re-entry failure output",
-        )
-        require_contains(
-            reentry_result.stdout + reentry_result.stderr,
-            "resolved graph key",
-            "workspace/cycles external re-entry failure output",
-        )
+        cycle_b_link = reentry_fixture / "apps" / "app" / "node_modules" / "@smoke" / "cycle-b"
+        cycle_b_expected = (reentry_fixture / "packages" / "cycle-b").resolve()
+        if not cycle_b_link.exists():
+            raise SmokeFailure(
+                "workspace/cycles external re-entry install: expected @smoke/cycle-b to be linked into the app node_modules"
+            )
+        if cycle_b_link.resolve() != cycle_b_expected:
+            raise SmokeFailure(
+                "workspace/cycles external re-entry install: expected transitive registry dependency @smoke/cycle-b to re-enter the local workspace member"
+            )
         reentry_paths = registry.requested_paths()[len(requests_before_reentry) :]
         if any("cycle-b" in path for path in reentry_paths):
             raise SmokeFailure(
-                "workspace/cycles external re-entry install: expected the resolver cache fix to keep @smoke/cycle-b off the registry path even though the default-path linker still fails later"
+                "workspace/cycles external re-entry install: expected the resolver cache fix to keep @smoke/cycle-b off the registry path while re-entering the local workspace member"
             )
 
 
@@ -4420,7 +4459,12 @@ def scenario_install_engines() -> None:
     require_contains(failure_output.lower(), "engine", "install/engines strict-fail output")
     require_contains(
         failure_output,
-        "does not satisfy required",
+        "Engine version mismatch",
+        "install/engines strict-fail output",
+    )
+    require_contains(
+        failure_output,
+        "required >=999.0.0",
         "install/engines strict-fail output",
     )
     require_not_contains(
@@ -8455,15 +8499,19 @@ def scenario_install_script_policy() -> None:
             [str(LPM_BIN), "install", "--auto-build", *install_flags],
             extra_env=unlock_env,
         )
-        if failing_result.returncode != 0:
+        if failing_result.returncode == 0:
             raise SmokeFailure(
-                "install/script-policy failing script surfaces failure but preserves install failed with exit code "
-                f"{failing_result.returncode}"
+                "install/script-policy failing script surfaces failure but preserves install: expected non-zero exit when trusted auto-build fails"
             )
         require_contains(
             failing_result.stdout + failing_result.stderr,
             "smoke-script-fail postinstall failed intentionally",
             "install/script-policy failing script output",
+        )
+        require_contains(
+            failing_result.stdout + failing_result.stderr,
+            "1 package(s) failed to build",
+            "install/script-policy failing script aggregate failure",
         )
         require_exists(failing_fixture / "node_modules" / "smoke-script-fail" / "package.json")
         require_exists(failing_fixture / "node_modules" / "smoke-script-fail" / "fail-marker.txt")
@@ -13424,7 +13472,7 @@ def scenario_install_dev_command() -> None:
             )
         validation_output = validation_result.stdout + validation_result.stderr
         require_contains(
-            validation_output,
+            validation_output.lower(),
             "environment validation failed",
             "install/dev env validation error header",
         )
@@ -18520,6 +18568,57 @@ def scenario_install_doctor_command() -> None:
                 "install/doctor all json: expected exactly one registry health probe and no whoami lookup without a token"
             )
 
+        with tempfile.TemporaryDirectory(prefix="lpm-doctor-auth-home-") as auth_home:
+            auth_env = smoke_home_env(
+                auth_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_TEST_FAST_SCRYPT="1",
+                LPM_PROVENANCE_ENFORCE="deny",
+            )
+            auth_registry_base = registry.registry_url.rstrip("/")
+            seed_access_session(auth_env, auth_registry_base, "doctor-stored-token")
+            auth_fixture = reset_doctor_fixture()
+            requests_before_auth_storage = list(registry.requested_paths())
+            auth_storage_result = run_command_result(
+                "install/doctor fast json with stored auth",
+                auth_fixture,
+                [str(LPM_BIN), "--registry", auth_registry_base, "--insecure", "doctor", "--json"],
+                extra_env=auth_env,
+            )
+            auth_storage_envelope = json.loads(auth_storage_result.stdout)
+            if auth_storage_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/doctor fast json with stored auth: expected success=true envelope"
+                )
+            auth_storage_check = next(
+                (
+                    check
+                    for check in auth_storage_envelope.get("checks", [])
+                    if check.get("code") == "auth_storage_fallback"
+                ),
+                None,
+            )
+            if not isinstance(auth_storage_check, dict):
+                raise SmokeFailure(
+                    "install/doctor fast json with stored auth: expected auth_storage_fallback check"
+                )
+            if auth_storage_check.get("severity") != "warn":
+                raise SmokeFailure(
+                    "install/doctor fast json with stored auth: expected auth_storage_fallback severity=warn"
+                )
+            if auth_storage_check.get("passed") is not True:
+                raise SmokeFailure(
+                    "install/doctor fast json with stored auth: expected auth_storage_fallback passed=true"
+                )
+            if auth_storage_check.get("detail") != "secure storage backend: encrypted file fallback":
+                raise SmokeFailure(
+                    "install/doctor fast json with stored auth: expected encrypted file fallback detail"
+                )
+            if registry.requested_paths() != requests_before_auth_storage:
+                raise SmokeFailure(
+                    "install/doctor fast json with stored auth: expected auth storage check to stay local-only"
+                )
+
         list_result = run_command_result(
             "install/doctor list json",
             fixture,
@@ -18539,7 +18638,13 @@ def scenario_install_doctor_command() -> None:
                 "install/doctor list json: expected count to match the number of returned entries"
             )
         listed_codes = {entry.get("code") for entry in entries}
-        for required_code in {"registry_reachable", expected_vault_code, "sigstore_verify_enforced"}:
+        for required_code in {
+            "registry_reachable",
+            "auth_storage_keychain",
+            "auth_storage_fallback",
+            expected_vault_code,
+            "sigstore_verify_enforced",
+        }:
             if required_code not in listed_codes:
                 raise SmokeFailure(
                     f"install/doctor list json: expected live catalog entry {required_code}"
@@ -18733,6 +18838,14 @@ def scenario_install_setup_commands() -> None:
             raise SmokeFailure(
                 "install/setup ci json: expected uses_env_var=false when LPM_TOKEN is provided"
             )
+        if ci_envelope.get("storage_backend") is not None:
+            raise SmokeFailure(
+                "install/setup ci json: expected storage_backend=null when the token comes from LPM_TOKEN"
+            )
+        if ci_envelope.get("storage_degraded") is not False:
+            raise SmokeFailure(
+                "install/setup ci json: expected storage_degraded=false for env-var auth"
+            )
         ci_content = ci_envelope.get("content")
         if not isinstance(ci_content, str) or "${LPM_TOKEN}" not in ci_content:
             raise SmokeFailure(
@@ -18747,6 +18860,66 @@ def scenario_install_setup_commands() -> None:
             raise SmokeFailure(
                 "install/setup ci .npmrc: expected the provided LPM_TOKEN to be written into the on-disk file"
             )
+
+        with tempfile.TemporaryDirectory(prefix="lpm-setup-ci-stored-home-") as stored_home, tempfile.TemporaryDirectory(
+            prefix="lpm-setup-ci-stored-project-"
+        ) as stored_project:
+            stored_env = smoke_home_env(
+                stored_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_TEST_FAST_SCRYPT="1",
+            )
+            stored_project_path = Path(stored_project)
+            stored_project_path.joinpath("package.json").write_text(
+                '{"name":"setup-ci-stored-smoke","private":true,"version":"0.0.0"}\n',
+                encoding="utf-8",
+            )
+            seed_access_session(stored_env, registry_base, "stored-session-token")
+            stored_result = run_command_result(
+                "install/setup ci json stored token",
+                stored_project_path,
+                [
+                    str(LPM_BIN),
+                    "--registry",
+                    registry_base,
+                    "--insecure",
+                    "--json",
+                    "setup",
+                    "ci",
+                ],
+                extra_env=stored_env,
+            )
+            if stored_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/setup ci json stored token failed with exit code {stored_result.returncode}"
+                )
+            stored_envelope = json.loads(stored_result.stdout)
+            if stored_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/setup ci json stored token: expected success=true"
+                )
+            if stored_envelope.get("uses_env_var") is not False:
+                raise SmokeFailure(
+                    "install/setup ci json stored token: expected uses_env_var=false for stored auth"
+                )
+            if stored_envelope.get("storage_backend") != "encrypted_file_fallback":
+                raise SmokeFailure(
+                    "install/setup ci json stored token: expected storage_backend=encrypted_file_fallback"
+                )
+            if stored_envelope.get("storage_degraded") is not True:
+                raise SmokeFailure(
+                    "install/setup ci json stored token: expected storage_degraded=true"
+                )
+            stored_content = stored_envelope.get("content")
+            if not isinstance(stored_content, str) or "${LPM_TOKEN}" not in stored_content:
+                raise SmokeFailure(
+                    "install/setup ci json stored token: expected JSON envelope content to keep the ${LPM_TOKEN} placeholder"
+                )
+            stored_npmrc = (stored_project_path / ".npmrc").read_text(encoding="utf-8")
+            if "stored-session-token" not in stored_npmrc:
+                raise SmokeFailure(
+                    "install/setup ci json stored token: expected the stored session token to be written to the on-disk .npmrc"
+                )
 
         local_result = run_command_result(
             "install/setup local json",
@@ -18938,7 +19111,7 @@ def scenario_install_ci_commands() -> None:
                     "install/ci env output file: expected ci.env to contain the merged dotenv payload"
                 )
             require_contains(
-                output_result.stderr,
+                output_result.stderr.lower(),
                 "wrote 3 vars to ci.env",
                 "install/ci env output file stderr",
             )
@@ -19386,6 +19559,16 @@ def scenario_install_whoami_command() -> None:
         )
         require_contains(
             auth_result.stderr,
+            "secure storage backend: encrypted file fallback",
+            "install/whoami authenticated secure storage backend",
+        )
+        require_contains(
+            auth_result.stderr,
+            "Encrypted file fallback is active",
+            "install/whoami authenticated fallback warning",
+        )
+        require_contains(
+            auth_result.stderr,
             "Identity loaded",
             "install/whoami authenticated completion",
         )
@@ -19404,6 +19587,45 @@ def scenario_install_whoami_command() -> None:
         if whoami_requests[0].get("headers", {}).get("authorization") != "Bearer access-primary":
             raise SmokeFailure(
                 "install/whoami authenticated: expected the stored access token in the Authorization header"
+            )
+
+        auth_json_result = run_command_result(
+            "install/whoami authenticated json",
+            auth_path,
+            [
+                str(LPM_BIN),
+                "--registry",
+                registry.registry_url.rstrip("/"),
+                "--json",
+                "whoami",
+            ],
+            extra_env=auth_env,
+        )
+        if auth_json_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/whoami authenticated json failed with exit code {auth_json_result.returncode}"
+            )
+        auth_json_envelope = json.loads(auth_json_result.stdout)
+        if auth_json_envelope.get("storage_backend") != "encrypted_file_fallback":
+            raise SmokeFailure(
+                "install/whoami authenticated json: expected top-level storage_backend=encrypted_file_fallback"
+            )
+        if auth_json_envelope.get("storage_degraded") is not True:
+            raise SmokeFailure(
+                "install/whoami authenticated json: expected top-level storage_degraded=true"
+            )
+        registries = auth_json_envelope.get("registries")
+        if not isinstance(registries, list) or not registries:
+            raise SmokeFailure(
+                "install/whoami authenticated json: expected registries array"
+            )
+        if registries[0].get("storage_backend") != "encrypted_file_fallback":
+            raise SmokeFailure(
+                "install/whoami authenticated json: expected registry entry storage_backend=encrypted_file_fallback"
+            )
+        if registries[0].get("storage_degraded") is not True:
+            raise SmokeFailure(
+                "install/whoami authenticated json: expected registry entry storage_degraded=true"
             )
 
 
@@ -19610,6 +19832,182 @@ def scenario_install_logout_command() -> None:
 
 def scenario_install_deploy_command() -> None:
     fixture = reset_workspace_targeting_fixture().resolve()
+
+    def write_text(path: Path, content: str) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+
+    def normalized_relative_file_spec(value: object) -> str | None:
+        if not isinstance(value, str):
+            return None
+        return value.replace("\\", "/")
+
+    def require_detail_value(stderr: str, label: str, expected: str, context: str) -> None:
+        for raw_line in stderr.splitlines():
+            line = raw_line.strip()
+            if line.startswith(label):
+                actual = line[len(label) :].strip()
+                if actual != expected:
+                    raise SmokeFailure(
+                        f"{context}: expected {label} {expected!r}, got {actual!r}"
+                    )
+                return
+        raise SmokeFailure(f"{context}: expected detail line for {label!r}")
+
+    def require_hardlinked_copy(source: Path, deployed: Path, context: str) -> None:
+        source_stat = source.stat()
+        deployed_stat = deployed.stat()
+        if source_stat.st_dev != deployed_stat.st_dev:
+            return
+        if source_stat.st_ino != deployed_stat.st_ino:
+            raise SmokeFailure(
+                f"{context}: expected a hardlinked copy on the same filesystem"
+            )
+
+    def write_deploy_workspace(workspace_root: Path) -> None:
+        write_package_json(
+            workspace_root / "package.json",
+            {
+                "name": "deploy-smoke-root",
+                "private": True,
+                "version": "0.0.0",
+                "workspaces": ["apps/*", "packages/*"],
+            },
+        )
+
+        api_dir = workspace_root / "apps" / "api"
+        write_package_json(
+            api_dir / "package.json",
+            {
+                "name": "@smoke/deploy-api",
+                "version": "1.0.0",
+                "files": ["src"],
+                "dependencies": {
+                    "@smoke/runtime": "workspace:*",
+                },
+                "devDependencies": {
+                    "@smoke/dev-tool": "workspace:*",
+                },
+                "optionalDependencies": {
+                    "@smoke/optional-addon": "workspace:*",
+                },
+            },
+        )
+        write_text(api_dir / "src" / "index.js", "module.exports = 'deploy-api'\n")
+        write_text(api_dir / "dev-only.txt", "this file should stay out of the deploy tree\n")
+        write_text(api_dir / "src" / ".env.production", "SHOULD_NOT_DEPLOY=1\n")
+        write_text(api_dir / "src" / "nested" / ".env.local", "SHOULD_NOT_DEPLOY=1\n")
+        write_text(
+            api_dir / "src" / "vendor" / "node_modules" / "blocked" / "index.js",
+            "module.exports = 'blocked'\n",
+        )
+        write_text(api_dir / "src" / "nested" / ".lpm" / "state.json", "{}\n")
+        write_text(api_dir / "src" / "nested" / "lpm.lock", "blocked\n")
+
+        mixed_dir = workspace_root / "apps" / "mixed"
+        write_package_json(
+            mixed_dir / "package.json",
+            {
+                "name": "@smoke/deploy-mixed",
+                "version": "1.0.0",
+                "files": ["src"],
+                "dependencies": {
+                    "@smoke/runtime": "workspace:*",
+                    "smoke-deploy-registry": "1.0.0",
+                },
+            },
+        )
+        write_text(mixed_dir / "src" / "index.js", "module.exports = 'deploy-mixed'\n")
+
+        filter_prod_app_dir = workspace_root / "apps" / "filter-prod-app"
+        write_package_json(
+            filter_prod_app_dir / "package.json",
+            {
+                "name": "@smoke/filter-prod-app",
+                "version": "1.0.0",
+                "files": ["src"],
+                "devDependencies": {
+                    "@smoke/filter-prod-helper": "workspace:*",
+                },
+            },
+        )
+        write_text(
+            filter_prod_app_dir / "src" / "index.js",
+            "module.exports = 'filter-prod-app'\n",
+        )
+
+        npmignore_dir = workspace_root / "apps" / "npmignore-app"
+        write_package_json(
+            npmignore_dir / "package.json",
+            {
+                "name": "@smoke/npmignore-app",
+                "version": "1.0.0",
+            },
+        )
+        write_text(npmignore_dir / "index.js", "module.exports = 'npmignore-app'\n")
+        write_text(npmignore_dir / "keep.txt", "keep me\n")
+        write_text(npmignore_dir / "ignored-by-npmignore.txt", "omit me\n")
+        write_text(npmignore_dir / "ignored-by-gitignore.txt", "keep me because npmignore wins\n")
+        write_text(npmignore_dir / ".npmignore", "ignored-by-npmignore.txt\n")
+        write_text(npmignore_dir / ".gitignore", "ignored-by-gitignore.txt\n")
+
+        gitignore_dir = workspace_root / "apps" / "gitignore-app"
+        write_package_json(
+            gitignore_dir / "package.json",
+            {
+                "name": "@smoke/gitignore-app",
+                "version": "1.0.0",
+            },
+        )
+        write_text(gitignore_dir / "index.js", "module.exports = 'gitignore-app'\n")
+        write_text(gitignore_dir / "keep.txt", "keep me\n")
+        write_text(gitignore_dir / "ignored-by-gitignore.txt", "omit me\n")
+        write_text(gitignore_dir / ".gitignore", "ignored-by-gitignore.txt\n")
+
+        workspace_packages = [
+            (
+                "runtime",
+                "@smoke/runtime",
+                {
+                    "version": "1.2.3",
+                },
+            ),
+            (
+                "dev-tool",
+                "@smoke/dev-tool",
+                {
+                    "version": "1.2.3",
+                },
+            ),
+            (
+                "optional-addon",
+                "@smoke/optional-addon",
+                {
+                    "version": "1.2.3",
+                },
+            ),
+            (
+                "filter-prod-helper",
+                "@smoke/filter-prod-helper",
+                {
+                    "version": "1.2.3",
+                    "dependencies": {
+                        "@smoke/runtime": "workspace:*",
+                    },
+                },
+            ),
+        ]
+
+        for dir_name, package_name, extra_manifest in workspace_packages:
+            package_dir = workspace_root / "packages" / dir_name
+            write_package_json(
+                package_dir / "package.json",
+                {
+                    "name": package_name,
+                    **extra_manifest,
+                },
+            )
+            write_text(package_dir / "index.js", f"module.exports = '{package_name}'\n")
 
     with tempfile.TemporaryDirectory(prefix="lpm-deploy-out-") as dry_run_output:
         dry_run_output_path = Path(dry_run_output)
@@ -19843,6 +20241,437 @@ def scenario_install_deploy_command() -> None:
             raise SmokeFailure(
                 "install/deploy outside workspace context: expected workspace-context guidance"
             )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-deploy-real-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-deploy-real-workspace-"
+    ) as workspace_root, tempfile.TemporaryDirectory(prefix="lpm-deploy-real-outs-") as outputs_root:
+        workspace_root_path = Path(workspace_root)
+        outputs_root_path = Path(outputs_root)
+        write_deploy_workspace(workspace_root_path)
+        deploy_env = smoke_home_env(
+            home_root,
+            LPM_FORCE_FILE_AUTH="1",
+            LPM_FORCE_FILE_VAULT="1",
+        )
+
+        def run_real_deploy(
+            label: str,
+            output_name: str,
+            package_expr: str,
+            extra_args: list[str] | None = None,
+            preseed_output: dict[str, str] | None = None,
+            filter_flag: str = "--filter",
+            extra_env: dict[str, str | None] | None = None,
+        ) -> tuple[Path, subprocess.CompletedProcess[str]]:
+            output_dir = outputs_root_path / output_name
+            output_dir.mkdir(parents=True, exist_ok=True)
+            if preseed_output:
+                for rel_path, content in preseed_output.items():
+                    write_text(output_dir / rel_path, content)
+            write_signed_project_unlock(home_root, output_dir, scopes=["cooldown-bypass"])
+            args = [
+                str(LPM_BIN),
+                "deploy",
+                str(output_dir),
+                filter_flag,
+                package_expr,
+            ]
+            if extra_args:
+                args.extend(extra_args)
+            result = run_command_result(
+                label,
+                workspace_root_path,
+                args,
+                extra_env={**deploy_env, **(extra_env or {})},
+            )
+            return output_dir, result
+
+        filter_prod_plain_result = run_command_result(
+            "install/deploy filter-prod plain filter expands dev closure",
+            workspace_root_path,
+            [
+                str(LPM_BIN),
+                "deploy",
+                str(outputs_root_path / "filter-prod-plain"),
+                "--filter",
+                "@smoke/filter-prod-app...",
+                "--dry-run",
+            ],
+            extra_env=deploy_env,
+        )
+        if filter_prod_plain_result.returncode == 0:
+            raise SmokeFailure(
+                "install/deploy filter-prod plain filter expands dev closure: expected a non-zero exit"
+            )
+        filter_prod_plain_combined = filter_prod_plain_result.stdout + filter_prod_plain_result.stderr
+        if (
+            "exactly one" not in filter_prod_plain_combined
+            and "multiple" not in filter_prod_plain_combined
+            and "matched 3" not in filter_prod_plain_combined
+        ):
+            raise SmokeFailure(
+                "install/deploy filter-prod plain filter expands dev closure: expected multi-match guidance"
+            )
+
+        filter_prod_output, filter_prod_result = run_real_deploy(
+            "install/deploy filter-prod real production",
+            "filter-prod",
+            "@smoke/filter-prod-app...",
+            filter_flag="--filter-prod",
+        )
+        if filter_prod_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/deploy filter-prod real production failed with exit code {filter_prod_result.returncode}"
+            )
+        require_contains(
+            filter_prod_result.stderr,
+            "Materializing production closure for @smoke/filter-prod-app",
+            "install/deploy filter-prod real production stderr",
+        )
+        require_detail_value(
+            filter_prod_result.stderr,
+            "workspace deps copied:",
+            "0",
+            "install/deploy filter-prod real production stderr",
+        )
+        require_detail_value(
+            filter_prod_result.stderr,
+            "workspace refs localized:",
+            "0",
+            "install/deploy filter-prod real production stderr",
+        )
+        filter_prod_manifest = read_json_file(filter_prod_output / "package.json")
+        if "dependencies" in filter_prod_manifest:
+            raise SmokeFailure(
+                "install/deploy filter-prod real production manifest: did not expect dependencies"
+            )
+        if "devDependencies" in filter_prod_manifest:
+            raise SmokeFailure(
+                "install/deploy filter-prod real production manifest: did not expect devDependencies"
+            )
+        require_exists(filter_prod_output / "src" / "index.js")
+        require_not_exists(filter_prod_output / ".lpm" / "deploy-workspace")
+        require_exists(filter_prod_output / "node_modules")
+        require_not_exists(filter_prod_output / "node_modules" / "@smoke" / "filter-prod-helper")
+
+        prod_output, prod_result = run_real_deploy(
+            "install/deploy real production",
+            "prod",
+            "@smoke/deploy-api",
+        )
+        if prod_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/deploy real production failed with exit code {prod_result.returncode}"
+            )
+        if prod_result.stdout.strip():
+            raise SmokeFailure("install/deploy real production: expected empty stdout")
+        require_contains(
+            prod_result.stderr,
+            "Materializing production closure for @smoke/deploy-api",
+            "install/deploy real production stderr",
+        )
+        require_contains(
+            prod_result.stderr,
+            "Done · deploy tree ready at",
+            "install/deploy real production stderr",
+        )
+        require_not_contains(
+            prod_result.stderr,
+            "│",
+            "install/deploy real production stderr glyphs",
+        )
+        require_not_contains(
+            prod_result.stderr,
+            "◇",
+            "install/deploy real production stderr glyphs",
+        )
+        require_detail_value(
+            prod_result.stderr,
+            "output:",
+            str(prod_output),
+            "install/deploy real production stderr",
+        )
+        require_detail_value(
+            prod_result.stderr,
+            "dependency mode:",
+            "production",
+            "install/deploy real production stderr",
+        )
+        require_detail_value(
+            prod_result.stderr,
+            "workspace deps copied:",
+            "2",
+            "install/deploy real production stderr",
+        )
+        require_detail_value(
+            prod_result.stderr,
+            "workspace refs localized:",
+            "2",
+            "install/deploy real production stderr",
+        )
+        require_detail_value(
+            prod_result.stderr,
+            "node_modules installed:",
+            "yes",
+            "install/deploy real production stderr",
+        )
+        prod_manifest = read_json_file(prod_output / "package.json")
+        prod_dependencies = prod_manifest.get("dependencies")
+        if prod_dependencies != {
+            "@smoke/runtime": "file:.lpm/deploy-workspace/packages/runtime"
+        }:
+            raise SmokeFailure(
+                "install/deploy real production manifest: expected localized runtime dependency"
+            )
+        prod_optional_dependencies = prod_manifest.get("optionalDependencies")
+        if prod_optional_dependencies != {
+            "@smoke/optional-addon": "file:.lpm/deploy-workspace/packages/optional-addon"
+        }:
+            raise SmokeFailure(
+                "install/deploy real production manifest: expected localized optional dependency"
+            )
+        if "devDependencies" in prod_manifest:
+            raise SmokeFailure(
+                "install/deploy real production manifest: did not expect devDependencies"
+            )
+        require_exists(prod_output / "src" / "index.js")
+        require_not_exists(prod_output / "dev-only.txt")
+        require_not_exists(prod_output / "src" / ".env.production")
+        require_not_exists(prod_output / "src" / "nested" / ".env.local")
+        require_not_exists(prod_output / "src" / "vendor" / "node_modules")
+        require_not_exists(prod_output / "src" / "nested" / ".lpm")
+        require_not_exists(prod_output / "src" / "nested" / "lpm.lock")
+        require_exists(prod_output / ".lpm" / "deploy-workspace" / "packages" / "runtime" / "package.json")
+        require_exists(
+            prod_output
+            / ".lpm"
+            / "deploy-workspace"
+            / "packages"
+            / "optional-addon"
+            / "package.json"
+        )
+        require_exists(prod_output / ".lpm" / "store")
+        require_exists(prod_output / "lpm.lock")
+        require_exists(prod_output / "node_modules" / "@smoke" / "runtime")
+        require_hardlinked_copy(
+            workspace_root_path / "apps" / "api" / "src" / "index.js",
+            prod_output / "src" / "index.js",
+            "install/deploy real production source copy",
+        )
+
+        dev_output, dev_result = run_real_deploy(
+            "install/deploy real dev mode",
+            "dev",
+            "@smoke/deploy-api",
+            extra_args=["--dev"],
+        )
+        if dev_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/deploy real dev mode failed with exit code {dev_result.returncode}"
+            )
+        require_detail_value(
+            dev_result.stderr,
+            "dependency mode:",
+            "development",
+            "install/deploy real dev mode stderr",
+        )
+        require_detail_value(
+            dev_result.stderr,
+            "workspace deps copied:",
+            "1",
+            "install/deploy real dev mode stderr",
+        )
+        require_detail_value(
+            dev_result.stderr,
+            "workspace refs localized:",
+            "1",
+            "install/deploy real dev mode stderr",
+        )
+        dev_manifest = read_json_file(dev_output / "package.json")
+        dev_dependencies = dev_manifest.get("devDependencies")
+        if dev_dependencies != {
+            "@smoke/dev-tool": "file:.lpm/deploy-workspace/packages/dev-tool"
+        }:
+            raise SmokeFailure(
+                "install/deploy real dev mode manifest: expected localized dev dependency"
+            )
+        if "dependencies" in dev_manifest:
+            raise SmokeFailure(
+                "install/deploy real dev mode manifest: did not expect dependencies"
+            )
+        if "optionalDependencies" in dev_manifest:
+            raise SmokeFailure(
+                "install/deploy real dev mode manifest: did not expect optionalDependencies"
+            )
+        require_exists(dev_output / ".lpm" / "deploy-workspace" / "packages" / "dev-tool" / "package.json")
+        require_not_exists(dev_output / ".lpm" / "deploy-workspace" / "packages" / "runtime")
+        require_not_exists(dev_output / ".lpm" / "deploy-workspace" / "packages" / "optional-addon")
+        require_exists(dev_output / "node_modules" / "@smoke" / "dev-tool")
+        require_not_exists(dev_output / "node_modules" / "@smoke" / "runtime")
+
+        no_optional_output, no_optional_result = run_real_deploy(
+            "install/deploy real no-optional mode",
+            "no-optional",
+            "@smoke/deploy-api",
+            extra_args=["--no-optional"],
+        )
+        if no_optional_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/deploy real no-optional mode failed with exit code {no_optional_result.returncode}"
+            )
+        require_detail_value(
+            no_optional_result.stderr,
+            "dependency mode:",
+            "production",
+            "install/deploy real no-optional mode stderr",
+        )
+        require_detail_value(
+            no_optional_result.stderr,
+            "workspace deps copied:",
+            "1",
+            "install/deploy real no-optional mode stderr",
+        )
+        require_detail_value(
+            no_optional_result.stderr,
+            "workspace refs localized:",
+            "1",
+            "install/deploy real no-optional mode stderr",
+        )
+        no_optional_manifest = read_json_file(no_optional_output / "package.json")
+        no_optional_runtime = normalized_relative_file_spec(
+            no_optional_manifest.get("dependencies", {}).get("@smoke/runtime")
+            if isinstance(no_optional_manifest.get("dependencies"), dict)
+            else None
+        )
+        if no_optional_runtime != "file:.lpm/deploy-workspace/packages/runtime":
+            raise SmokeFailure(
+                "install/deploy real no-optional mode manifest: expected localized runtime dependency"
+            )
+        if "optionalDependencies" in no_optional_manifest:
+            raise SmokeFailure(
+                "install/deploy real no-optional mode manifest: did not expect optionalDependencies"
+            )
+        require_exists(
+            no_optional_output / ".lpm" / "deploy-workspace" / "packages" / "runtime" / "package.json"
+        )
+        require_not_exists(
+            no_optional_output / ".lpm" / "deploy-workspace" / "packages" / "optional-addon"
+        )
+        require_exists(no_optional_output / "node_modules" / "@smoke" / "runtime")
+        require_not_exists(no_optional_output / "node_modules" / "@smoke" / "optional-addon")
+
+        registry_packages = [
+            {
+                "name": "smoke-deploy-registry",
+                "dist_tags": {"latest": "1.0.0"},
+                "versions": {
+                    "1.0.0": {
+                        "metadata_extra": {"dependencies": {}},
+                        "package_json_extra": {"main": "index.js"},
+                        "files": {
+                            "index.js": "module.exports = 'smoke-deploy-registry'\n",
+                        },
+                        "published_at": iso8601_n_secs_ago(3600),
+                    }
+                },
+            }
+        ]
+        with MockRegistry(registry_packages) as registry:
+            write_registry_npmrc(Path(home_root), registry.registry_url)
+            mixed_output, mixed_result = run_real_deploy(
+                "install/deploy mixed workspace and registry deps",
+                "mixed",
+                "@smoke/deploy-mixed",
+            )
+            if mixed_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/deploy mixed workspace and registry deps failed with exit code {mixed_result.returncode}"
+                )
+            require_contains(
+                mixed_result.stderr,
+                "Materializing production closure for @smoke/deploy-mixed",
+                "install/deploy mixed workspace and registry deps stderr",
+            )
+            require_contains(
+                mixed_result.stderr,
+                "Installing 2 packages",
+                "install/deploy mixed workspace and registry deps stderr",
+            )
+            require_detail_value(
+                mixed_result.stderr,
+                "workspace deps copied:",
+                "1",
+                "install/deploy mixed workspace and registry deps stderr",
+            )
+            require_detail_value(
+                mixed_result.stderr,
+                "workspace refs localized:",
+                "1",
+                "install/deploy mixed workspace and registry deps stderr",
+            )
+            mixed_manifest = read_json_file(mixed_output / "package.json")
+            mixed_dependencies = mixed_manifest.get("dependencies")
+            if mixed_dependencies != {
+                "@smoke/runtime": "file:.lpm/deploy-workspace/packages/runtime",
+                "smoke-deploy-registry": "1.0.0",
+            }:
+                raise SmokeFailure(
+                    "install/deploy mixed workspace and registry deps manifest: expected localized workspace dep and preserved registry dep"
+                )
+            require_exists(
+                mixed_output / ".lpm" / "deploy-workspace" / "packages" / "runtime" / "package.json"
+            )
+            require_exists(mixed_output / "node_modules" / "@smoke" / "runtime")
+            require_exists(mixed_output / "node_modules" / "smoke-deploy-registry")
+            require_contains(
+                read_optional_text(mixed_output / "lpm.lock"),
+                "smoke-deploy-registry",
+                "install/deploy mixed workspace and registry deps lpm.lock",
+            )
+            registry_paths = set(registry.requested_paths())
+            metadata_paths = {
+                "/api/registry/batch-metadata",
+                "/api/registry/smoke-deploy-registry",
+                "/smoke-deploy-registry",
+            }
+            if not metadata_paths.intersection(registry_paths):
+                raise SmokeFailure(
+                    "install/deploy mixed workspace and registry deps: expected registry metadata traffic"
+                )
+            if "/tarballs/smoke-deploy-registry/-/smoke-deploy-registry-1.0.0.tgz" not in registry_paths:
+                raise SmokeFailure(
+                    "install/deploy mixed workspace and registry deps: expected registry tarball fetch"
+                )
+
+        npmignore_output, npmignore_result = run_real_deploy(
+            "install/deploy npmignore precedence",
+            "npmignore",
+            "@smoke/npmignore-app",
+        )
+        if npmignore_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/deploy npmignore precedence failed with exit code {npmignore_result.returncode}"
+            )
+        require_exists(npmignore_output / "index.js")
+        require_exists(npmignore_output / "keep.txt")
+        require_not_exists(npmignore_output / "ignored-by-npmignore.txt")
+        require_exists(npmignore_output / "ignored-by-gitignore.txt")
+
+        gitignore_output, gitignore_result = run_real_deploy(
+            "install/deploy gitignore fallback with force",
+            "gitignore",
+            "@smoke/gitignore-app",
+            extra_args=["--force"],
+            preseed_output={"existing.txt": "remove me\n"},
+        )
+        if gitignore_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/deploy gitignore fallback with force failed with exit code {gitignore_result.returncode}"
+            )
+        require_not_exists(gitignore_output / "existing.txt")
+        require_exists(gitignore_output / "index.js")
+        require_exists(gitignore_output / "keep.txt")
+        require_not_exists(gitignore_output / "ignored-by-gitignore.txt")
 
 
 def scenario_install_publish_command() -> None:
@@ -22239,6 +23068,9 @@ def scenario_install_auth_commands() -> None:
     def credentials_path(home: str) -> Path:
         return Path(smoke_home_path(home)) / ".credentials"
 
+    def encode_json(payload: dict[str, object]) -> bytes:
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
     def write_publish_package(project_path: Path, package_name: str) -> None:
         project_path.joinpath("package.json").write_text(
             json.dumps(
@@ -22275,6 +23107,47 @@ def scenario_install_auth_commands() -> None:
             "exit 1\n",
         )
 
+        with tempfile.TemporaryDirectory(prefix="lpm-auth-npm-human-home-") as npm_human_home, tempfile.TemporaryDirectory(
+            prefix="lpm-auth-npm-human-project-"
+        ) as npm_human_project:
+            npm_human_result = run_command_result(
+                "install/auth npm explicit-token login human",
+                Path(npm_human_project),
+                [str(LPM_BIN), "login", "--npm", "--token", "npm-fallback-token"],
+                extra_env=smoke_home_env(
+                    npm_human_home,
+                    **common_auth_env,
+                ),
+            )
+            if npm_human_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/auth npm explicit-token login human failed with exit code {npm_human_result.returncode}"
+                )
+            if npm_human_result.stdout.strip():
+                raise SmokeFailure(
+                    "install/auth npm explicit-token login human: expected empty stdout"
+                )
+            require_contains(
+                npm_human_result.stderr,
+                "Token stored for npmjs.org",
+                "install/auth npm explicit-token login human stderr",
+            )
+            require_contains(
+                npm_human_result.stderr,
+                "secure storage backend: encrypted file fallback",
+                "install/auth npm explicit-token login human backend",
+            )
+            require_contains(
+                npm_human_result.stderr,
+                "Encrypted file fallback is active",
+                "install/auth npm explicit-token login human warning",
+            )
+            require_not_contains(
+                npm_human_result.stderr,
+                "●",
+                "install/auth npm explicit-token login human glyphs",
+            )
+
         with tempfile.TemporaryDirectory(prefix="lpm-auth-gh-home-") as gh_home, tempfile.TemporaryDirectory(
             prefix="lpm-auth-gh-project-"
         ) as gh_project:
@@ -22304,6 +23177,14 @@ def scenario_install_auth_commands() -> None:
             if gh_envelope.get("stored") is not False:
                 raise SmokeFailure(
                     "install/auth github host-cli login json: expected stored=false"
+                )
+            if gh_envelope.get("storage_backend") is not None:
+                raise SmokeFailure(
+                    "install/auth github host-cli login json: expected storage_backend=null for host-CLI auth"
+                )
+            if gh_envelope.get("storage_degraded") is not False:
+                raise SmokeFailure(
+                    "install/auth github host-cli login json: expected storage_degraded=false for host-CLI auth"
                 )
             if credentials_path(gh_home).exists():
                 raise SmokeFailure(
@@ -22339,6 +23220,14 @@ def scenario_install_auth_commands() -> None:
             if npm_envelope.get("stored") is not True:
                 raise SmokeFailure(
                     "install/auth npm env login json: expected stored=true"
+                )
+            if npm_envelope.get("storage_backend") != "encrypted_file_fallback":
+                raise SmokeFailure(
+                    "install/auth npm env login json: expected storage_backend=encrypted_file_fallback"
+                )
+            if npm_envelope.get("storage_degraded") is not True:
+                raise SmokeFailure(
+                    "install/auth npm env login json: expected storage_degraded=true"
                 )
             if not credentials_path(npm_home).exists():
                 raise SmokeFailure(
@@ -22381,10 +23270,198 @@ def scenario_install_auth_commands() -> None:
                 raise SmokeFailure(
                     "install/auth gitlab explicit-token login json: expected stored=true"
                 )
+            if gitlab_envelope.get("storage_backend") != "encrypted_file_fallback":
+                raise SmokeFailure(
+                    "install/auth gitlab explicit-token login json: expected storage_backend=encrypted_file_fallback"
+                )
+            if gitlab_envelope.get("storage_degraded") is not True:
+                raise SmokeFailure(
+                    "install/auth gitlab explicit-token login json: expected storage_degraded=true"
+                )
             if not credentials_path(gitlab_home).exists():
                 raise SmokeFailure(
                     "install/auth gitlab explicit-token login json: expected explicit GitLab login to create ~/.lpm/.credentials"
                 )
+
+        token_rotate_body = encode_json(
+            {
+                "token": "new-session-token",
+                "expiresAt": "2032-01-03T04:05:06Z",
+            }
+        )
+        with MockRegistry(
+            [],
+            extra_method_routes={
+                ("POST", "/api/registry/-/token/rotate"): (
+                    200,
+                    "application/json",
+                    token_rotate_body,
+                )
+            },
+        ) as rotate_registry, tempfile.TemporaryDirectory(prefix="lpm-auth-rotate-json-home-") as rotate_json_home, tempfile.TemporaryDirectory(
+            prefix="lpm-auth-rotate-json-project-"
+        ) as rotate_json_project:
+            rotate_registry_base = rotate_registry.registry_url.rstrip("/")
+            rotate_json_env = smoke_home_env(
+                rotate_json_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_TEST_FAST_SCRYPT="1",
+            )
+            seed_access_session(rotate_json_env, rotate_registry_base, "old-session-token")
+            rotate_json_path = Path(rotate_json_project)
+            rotate_json_path.joinpath("package.json").write_text(
+                '{"name":"token-rotate-smoke","version":"1.0.0"}\n',
+                encoding="utf-8",
+            )
+            rotate_json_result = run_command_result(
+                "install/auth token rotate json",
+                rotate_json_path,
+                [str(LPM_BIN), "--registry", rotate_registry_base, "--json", "token-rotate"],
+                extra_env=rotate_json_env,
+            )
+            if rotate_json_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/auth token rotate json failed with exit code {rotate_json_result.returncode}"
+                )
+            rotate_json_envelope = json.loads(rotate_json_result.stdout)
+            if rotate_json_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/auth token rotate json: expected success=true"
+                )
+            if rotate_json_envelope.get("rotated") is not True:
+                raise SmokeFailure(
+                    "install/auth token rotate json: expected rotated=true"
+                )
+            if rotate_json_envelope.get("expires_at") != "2032-01-03T04:05:06Z":
+                raise SmokeFailure(
+                    "install/auth token rotate json: expected expires_at from the rotate response"
+                )
+            if rotate_json_envelope.get("storage_backend") != "encrypted_file_fallback":
+                raise SmokeFailure(
+                    "install/auth token rotate json: expected storage_backend=encrypted_file_fallback"
+                )
+            if rotate_json_envelope.get("storage_degraded") is not True:
+                raise SmokeFailure(
+                    "install/auth token rotate json: expected storage_degraded=true"
+                )
+            rotate_requests = rotate_registry.request_details(
+                method="POST",
+                path="/api/registry/-/token/rotate",
+            )
+            if len(rotate_requests) != 1:
+                raise SmokeFailure(
+                    "install/auth token rotate json: expected exactly one token-rotate request"
+                )
+            if rotate_requests[0].get("headers", {}).get("authorization") != "Bearer old-session-token":
+                raise SmokeFailure(
+                    "install/auth token rotate json: expected the old stored token in the Authorization header"
+                )
+            rotated_setup_result = run_command_result(
+                "install/auth token rotate setup ci json",
+                rotate_json_path,
+                [
+                    str(LPM_BIN),
+                    "--registry",
+                    rotate_registry_base,
+                    "--insecure",
+                    "--json",
+                    "setup",
+                    "ci",
+                ],
+                extra_env=rotate_json_env,
+            )
+            if rotated_setup_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/auth token rotate setup ci json failed with exit code {rotated_setup_result.returncode}"
+                )
+            rotated_setup_envelope = json.loads(rotated_setup_result.stdout)
+            if rotated_setup_envelope.get("storage_backend") != "encrypted_file_fallback":
+                raise SmokeFailure(
+                    "install/auth token rotate setup ci json: expected stored rotated auth to report encrypted_file_fallback"
+                )
+            if "new-session-token" not in rotate_json_path.joinpath(".npmrc").read_text(encoding="utf-8"):
+                raise SmokeFailure(
+                    "install/auth token rotate setup ci json: expected the rotated token to be persisted for later auth consumers"
+                )
+
+        with MockRegistry(
+            [],
+            extra_method_routes={
+                ("POST", "/api/registry/-/token/rotate"): (
+                    200,
+                    "application/json",
+                    token_rotate_body,
+                )
+            },
+        ) as rotate_registry, tempfile.TemporaryDirectory(prefix="lpm-auth-rotate-human-home-") as rotate_human_home, tempfile.TemporaryDirectory(
+            prefix="lpm-auth-rotate-human-project-"
+        ) as rotate_human_project:
+            rotate_registry_base = rotate_registry.registry_url.rstrip("/")
+            rotate_human_env = smoke_home_env(
+                rotate_human_home,
+                LPM_FORCE_FILE_AUTH="1",
+                LPM_TEST_FAST_SCRYPT="1",
+            )
+            seed_access_session(rotate_human_env, rotate_registry_base, "old-session-token")
+            rotate_human_path = Path(rotate_human_project)
+            rotate_human_path.joinpath("package.json").write_text(
+                '{"name":"token-rotate-smoke","version":"1.0.0"}\n',
+                encoding="utf-8",
+            )
+            rotate_human_result = run_command_result(
+                "install/auth token rotate human",
+                rotate_human_path,
+                [str(LPM_BIN), "--registry", rotate_registry_base, "token-rotate"],
+                extra_env=rotate_human_env,
+            )
+            if rotate_human_result.returncode != 0:
+                raise SmokeFailure(
+                    f"install/auth token rotate human failed with exit code {rotate_human_result.returncode}"
+                )
+            if rotate_human_result.stdout.strip():
+                raise SmokeFailure(
+                    "install/auth token rotate human: expected empty stdout"
+                )
+            require_contains(
+                rotate_human_result.stderr,
+                "Rotating lpm.dev token",
+                "install/auth token rotate human stderr",
+            )
+            require_contains(
+                rotate_human_result.stderr,
+                "Old token invalidated",
+                "install/auth token rotate human old-token step",
+            )
+            require_contains(
+                rotate_human_result.stderr,
+                "New token stored",
+                "install/auth token rotate human new-token step",
+            )
+            require_contains(
+                rotate_human_result.stderr,
+                "secure storage backend: encrypted file fallback",
+                "install/auth token rotate human backend",
+            )
+            require_contains(
+                rotate_human_result.stderr,
+                "Encrypted file fallback is active",
+                "install/auth token rotate human warning",
+            )
+            require_contains(
+                rotate_human_result.stderr,
+                "Done · session token rotated successfully",
+                "install/auth token rotate human completion",
+            )
+            require_contains(
+                rotate_human_result.stderr,
+                "2032-01-03T04:05:06Z",
+                "install/auth token rotate human expiry",
+            )
+            require_not_contains(
+                rotate_human_result.stderr,
+                "●",
+                "install/auth token rotate human glyphs",
+            )
 
         with tempfile.TemporaryDirectory(prefix="lpm-publish-auth-home-") as publish_home, tempfile.TemporaryDirectory(
             prefix="lpm-publish-auth-project-"
@@ -23612,7 +24689,7 @@ SCENARIOS = {
         scenario_install_cert_command,
     ),
     "install-doctor": (
-        "Run lpm doctor coverage for fast-vs-all presets, live doctor-list filters, and fast --fix staying local-only while regenerating lpm.lockb.",
+        "Run lpm doctor coverage for fast-vs-all presets, auth-storage backend checks, live doctor-list filters, and fast --fix staying local-only while regenerating lpm.lockb.",
         scenario_install_doctor_command,
     ),
     "install-health": (
@@ -23628,7 +24705,7 @@ SCENARIOS = {
         scenario_install_init_command,
     ),
     "install-whoami": (
-        "Run lpm whoami coverage for logged-out offline guidance, authenticated account summaries, and bearer-token whoami lookups.",
+        "Run lpm whoami coverage for logged-out offline guidance, authenticated account summaries, auth storage backend visibility, and bearer-token whoami lookups.",
         scenario_install_whoami_command,
     ),
     "install-logout": (
@@ -23652,11 +24729,11 @@ SCENARIOS = {
         scenario_install_node_runtime_command,
     ),
     "install-setup": (
-        "Run lpm setup ci/local coverage for renamed command parsing, CI .npmrc generation, and local read-only token setup.",
+        "Run lpm setup ci/local coverage for renamed command parsing, CI .npmrc generation, auth storage backend visibility, and local read-only token setup.",
         scenario_install_setup_commands,
     ),
     "install-auth": (
-        "Run third-party login fallback coverage plus missing-auth publish guidance for npm, GitHub Packages, and GitLab Packages.",
+        "Run third-party login fallback coverage, token-rotate auth-storage visibility, and missing-auth publish guidance for npm, GitHub Packages, and GitLab Packages.",
         scenario_install_auth_commands,
     ),
     "install-bun-runtime": (
@@ -23820,7 +24897,7 @@ SCENARIOS = {
         scenario_workspace_nested_boundary,
     ),
     "workspace-cycles": (
-        "Run workspace cycle coverage for pure A->B->A installs plus the current default-path external registry re-entry linker failure without registry leakage.",
+        "Run workspace cycle coverage for pure A->B->A installs plus successful default-path external registry re-entry into the local workspace without registry leakage.",
         scenario_workspace_cycles,
     ),
     "workspace-rollback": (
