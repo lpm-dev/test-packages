@@ -6,4 +6,8 @@
 **/lpm.lock
 **/lpm.lockb
 **/dist/
+install/**/.npmrc
+workspace/**/.npmrc
+install/dev/basic/*-capture.json
+install/dev/orchestration/orchestration-events.jsonl
 *.log

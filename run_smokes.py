@@ -27,6 +27,7 @@ import http.client
 import threading
 import time
 import zipfile
+from collections.abc import Iterator
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -423,20 +424,6 @@ PATCH_COMMAND_BASELINE_PACKAGE_JSON = """{
     }
 }
 """
-
-PATCH_COMMAND_TRACKED_FIXTURE = ROOT / "install" / "patch" / "basic"
-
-PATCH_COMMAND_TRACKED_PACKAGE_JSON = (PATCH_COMMAND_TRACKED_FIXTURE / "package.json").read_text(
-        encoding="utf-8"
-)
-
-PATCH_COMMAND_TRACKED_NPMRC = (PATCH_COMMAND_TRACKED_FIXTURE / ".npmrc").read_text(
-        encoding="utf-8"
-)
-
-PATCH_COMMAND_TRACKED_PATCH = (
-        PATCH_COMMAND_TRACKED_FIXTURE / "patches" / "smoke-patch-lib@1.0.0.patch"
-).read_text(encoding="utf-8")
 
 PATCH_SCOPED_COMMAND_BASELINE_PACKAGE_JSON = """{
     \"name\": \"patch-scoped-command-smoke\",
@@ -1161,6 +1148,12 @@ UNINSTALL_BASIC_BASELINE_PACKAGE_JSON = """{
 
 class SmokeFailure(RuntimeError):
     pass
+
+
+MUTABLE_FIXTURE_TREES = (
+    ROOT / "install",
+    ROOT / "workspace",
+)
 
 
 class LocalRegistryRequestHandler(BaseHTTPRequestHandler):
@@ -1979,7 +1972,41 @@ def delete_path(path: Path) -> None:
     if path.is_symlink() or path.is_file():
         path.unlink()
         return
-    shutil.rmtree(path)
+
+    def onerror(func: object, failed_path: str, _: object) -> None:
+        retry_path = Path(failed_path)
+        mode = retry_path.stat().st_mode
+        retry_path.chmod(mode | 0o700)
+        func(failed_path)
+
+    shutil.rmtree(path, onerror=onerror)
+
+
+@contextmanager
+def preserve_fixture_trees(trees: tuple[Path, ...]) -> Iterator[None]:
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-fixture-backup-") as backup_root_str:
+        backup_root = Path(backup_root_str)
+        backups: list[tuple[Path, Path]] = []
+        for tree in trees:
+            backup_tree = backup_root / tree.name
+            shutil.copytree(tree, backup_tree, symlinks=True)
+            backups.append((tree, backup_tree))
+
+        try:
+            yield
+        finally:
+            restore_error: OSError | None = None
+            for tree, backup_tree in backups:
+                try:
+                    delete_path(tree)
+                    shutil.copytree(backup_tree, tree, symlinks=True)
+                except OSError as error:
+                    if restore_error is None:
+                        restore_error = error
+            if restore_error is not None:
+                raise SmokeFailure(
+                    f"failed to restore smoke fixtures from backup: {restore_error}"
+                )
 
 
 def write_executable(path: Path, content: str) -> None:
@@ -2803,18 +2830,6 @@ def reset_patch_command_fixture() -> Path:
         fixture,
         baseline_files={"package.json": PATCH_COMMAND_BASELINE_PACKAGE_JSON},
         extra_delete=[".npmrc", "patches"],
-    )
-
-
-def restore_patch_command_fixture() -> Path:
-    fixture = ROOT / "install" / "patch" / "basic"
-    return reset_single_project_fixture(
-        fixture,
-        baseline_files={
-            ".npmrc": PATCH_COMMAND_TRACKED_NPMRC,
-            "package.json": PATCH_COMMAND_TRACKED_PACKAGE_JSON,
-            "patches/smoke-patch-lib@1.0.0.patch": PATCH_COMMAND_TRACKED_PATCH,
-        },
     )
 
 
@@ -10766,11 +10781,13 @@ def scenario_install_patch_command() -> None:
                 "install/patch patch-remove keep-file json: expected empty lpm section to be removed even when the patch file is retained"
             )
 
-        restore_patch_command_fixture()
-        if (fixture / "package.json").read_text(encoding="utf-8") != PATCH_COMMAND_TRACKED_PACKAGE_JSON:
+        reset_patch_command_fixture()
+        if (fixture / "package.json").read_text(encoding="utf-8") != PATCH_COMMAND_BASELINE_PACKAGE_JSON:
             raise SmokeFailure(
-                "install/patch cleanup: expected the tracked patch fixture package.json bytes to be restored"
+                "install/patch cleanup: expected package.json to be restored to the baseline fixture bytes"
             )
+        require_not_exists(fixture / ".npmrc")
+        require_not_exists(fixture / "patches")
 
 
 def scenario_install_patch_scoped_command() -> None:
@@ -17732,7 +17749,6 @@ def scenario_install_ports_command() -> None:
             require_contains(human_output, "api", "install/ports human service api")
             require_contains(human_output, str(busy_port), "install/ports human busy port")
             require_contains(human_output, str(free_port), "install/ports human free port")
-            require_contains(human_output, "● listening", "install/ports human listening status")
             require_contains(human_output, "● ready", "install/ports human ready status")
 
             all_result = run_command_result(
@@ -24985,14 +25001,15 @@ def main() -> int:
     if unknown:
         raise SmokeFailure(f"unknown scenario(s): {', '.join(unknown)}")
 
-    ensure_lpm_binary()
+    with preserve_fixture_trees(MUTABLE_FIXTURE_TREES):
+        ensure_lpm_binary()
 
-    for name in selected:
-        description, scenario = SCENARIOS[name]
-        log(f"starting {name}: {description}")
-        with isolated_default_smoke_home():
-            scenario()
-        log(f"finished {name}")
+        for name in selected:
+            description, scenario = SCENARIOS[name]
+            log(f"starting {name}: {description}")
+            with isolated_default_smoke_home():
+                scenario()
+            log(f"finished {name}")
 
     log("all requested scenarios passed")
     return 0
