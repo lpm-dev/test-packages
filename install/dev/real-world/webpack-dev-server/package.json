@@ -1,0 +1,14 @@
+{
+    "name": "dev-real-webpack-dev-server-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "scripts": {
+        "dev": "NODE_PATH=./node_modules webpack-dev-server --host 127.0.0.1 --port $PORT --config webpack.config.cjs"
+    },
+    "dependencies": {
+        "html-webpack-plugin": "5.6.3",
+        "webpack": "5.99.9",
+        "webpack-cli": "6.0.1",
+        "webpack-dev-server": "5.2.2"
+    }
+}

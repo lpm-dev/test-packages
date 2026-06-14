@@ -1,0 +1,16 @@
+{
+    "name": "dev-real-sveltekit-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "vite dev --host 127.0.0.1 --port $PORT --strictPort"
+    },
+    "dependencies": {
+        "@sveltejs/adapter-auto": "3.3.1",
+        "@sveltejs/kit": "2.21.5",
+        "@sveltejs/vite-plugin-svelte": "5.1.0",
+        "svelte": "5.33.2",
+        "vite": "6.3.5"
+    }
+}

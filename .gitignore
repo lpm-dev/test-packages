@@ -6,6 +6,14 @@
 **/lpm.lock
 **/lpm.lockb
 **/dist/
+install/dev/real-world/**/.astro/
+install/dev/real-world/**/.cache/
+install/dev/real-world/**/.next/
+install/dev/real-world/**/.nuxt/
+install/dev/real-world/**/.svelte-kit/
+install/dev/real-world/**/build/
+install/dev/real-world/**/storybook-static/
+install/dev/real-world/**/.lpm-bin-realpath.json
 install/**/.npmrc
 workspace/**/.npmrc
 install/dev/basic/*-capture.json

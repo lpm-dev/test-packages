@@ -1,0 +1,12 @@
+{
+    "name": "dev-real-astro-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "astro dev --host 127.0.0.1 --port $PORT"
+    },
+    "dependencies": {
+        "astro": "5.9.2"
+    }
+}

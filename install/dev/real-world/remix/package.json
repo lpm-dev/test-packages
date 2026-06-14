@@ -1,0 +1,20 @@
+{
+    "name": "dev-real-remix-smoke",
+    "private": true,
+    "version": "0.0.0",
+    "type": "module",
+    "scripts": {
+        "dev": "remix vite:dev --host 127.0.0.1 --port $PORT"
+    },
+    "dependencies": {
+        "@remix-run/dev": "2.16.8",
+        "@remix-run/node": "2.16.8",
+        "@remix-run/react": "2.16.8",
+        "@remix-run/serve": "2.16.8",
+        "esbuild": "0.25.12",
+        "isbot": "5.1.42",
+        "react": "18.3.1",
+        "react-dom": "18.3.1",
+        "vite": "6.3.5"
+    }
+}

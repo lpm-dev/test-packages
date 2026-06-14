@@ -1,0 +1,4 @@
+[[policy.typosquat.allow]]
+package = "nuxt"
+similar-to = "next"
+reason = "Intentional Nuxt framework smoke fixture"
