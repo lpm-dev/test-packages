@@ -4,7 +4,8 @@
     "version": "0.0.0",
     "type": "module",
     "scripts": {
-        "dev": "nuxt dev --host 127.0.0.1 --port $PORT"
+        "dev": "nuxt dev --host 127.0.0.1 --port $PORT",
+        "build": "nuxt build"
     },
     "dependencies": {
         "@vue/compiler-sfc": "3.5.38",

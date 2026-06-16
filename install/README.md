@@ -16,7 +16,7 @@ Current seed fixture:
 - `config-aware/` — clean consumer project for interactive config-aware `lpm add` coverage
 - `read-only-routing/` — mock-registry fixture for `.npmrc`-routed `lpm info`, `lpm resolve`, `lpm search`, and `lpm download` checks when only npm-style endpoints are available
 - `pack/` — local fixture for `lpm pack`, covering missing-tsdown fail-fast plus project-local tsdown resolution and stdout passthrough
-- `dev/real-world/` — heavy real-framework `lpm dev` fixtures for v2 dev-entrypoint compatibility relinking across Next/Turbopack, Vite, Astro, Webpack dev server, Remix, Nuxt, SvelteKit, and Storybook
+- `dev/real-world/` — heavy real-framework fixtures for v2 `lpm dev` compatibility relinking across Next/Turbopack, Vite, Astro, Webpack dev server, Remix, Nuxt, SvelteKit, and Storybook, plus installed-app build/runtime checks across Next/Turbopack, Vite, Angular, Astro, SvelteKit, Nuxt, and React Router
 - `upgrade/` — mock-registry fixture for `lpm upgrade` against public-npm and configured-registry lockfile sources
 - `audit/` — mock-registry fixture for `lpm audit` and `lpm audit fix`, covering behavior/secrets gates plus direct-dependency fix dry-runs, apply flows, and custom-registry skip safety
 - `create-project-smoke/` — migrated legacy single-project fixture for bootstrap/create flows
@@ -48,6 +48,7 @@ Relevant runner entries:
 - `python3 run_smokes.py install-read-only-routing`
 - `python3 run_smokes.py install-pack`
 - `python3 run_smokes.py install-dev-real-world`
+- `python3 run_smokes.py install-ecosystem-build` (opt-in canary)
 - `python3 run_smokes.py install-upgrade`
 - `python3 run_smokes.py install-outdated`
 - `python3 run_smokes.py install-outdated-skipped-private`

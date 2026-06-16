@@ -7,11 +7,15 @@ Local live/smoke fixtures for manual `lpm` testing.
 Use `python3 run_smokes.py --list` to see the available scenarios.
 
 Use `python3 run_smokes.py all` to rebuild `lpm-rs`, reset the relevant fixtures,
-and run the current live smoke suite end to end.
+and run the current live smoke suite end to end, excluding opt-in canaries.
 
 Use `python3 run_smokes.py install-dev-real-world` to run the heavy real-framework
 `lpm dev` smoke suite for v2 dev-entrypoint compatibility across Next/Turbopack,
 Vite, Astro, Webpack dev server, Remix, Nuxt, SvelteKit, and Storybook.
+
+Use `python3 run_smokes.py install-ecosystem-build` to run the separate opt-in
+heavy installed-app build/runtime canary across Next/Turbopack, Vite, Angular,
+Astro, SvelteKit, Nuxt, and React Router.
 
 Use `LPM_SMOKE_NATIVE_SECURITY_UNLOCK=1 python3 run_smokes.py install-security`
 to opt into the native macOS approval dialog path for `lpm security unlock`.
@@ -47,7 +51,7 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/graph` — local fixture for direct `lpm graph` runs, covering resolved tree output, substring `--filter` semantics, graph-level depth pruning across json/stats/html, and the `--no-open` warning contract
 - `install/pack` — local fixture for direct `lpm pack` runs, covering missing-tsdown fail-fast behavior plus project-local tsdown resolution and direct single-package stdout passthrough
 - `install/dev` — local fixture set for direct `lpm dev` runs, covering `.env.example` bootstrap, env-schema validation vs `--no-env-check`, explicit `--env` layering, forwarded args after `--`, the `--no-install` startup banner, hermetic `--https` consent/bootstrap behavior, successful loopback tunnel hello plus persisted inspector session state and `--tunnel-auth`, refresh-backed tunnel inspector/no-inspect/strict inspect-port behavior, and multi-service `dependsOn` orchestration with cross-service env injection
-- `install/dev/real-world` — heavy real-framework `lpm dev` fixtures for v2 dev-entrypoint compatibility relinking across Next/Turbopack, Vite, Astro, Webpack dev server, Remix, Nuxt, SvelteKit, and Storybook
+- `install/dev/real-world` — heavy real-framework fixtures for `lpm dev` compatibility relinking across Next/Turbopack, Vite, Astro, Webpack dev server, Remix, Nuxt, SvelteKit, and Storybook, plus installed-app build/runtime checks across Next/Turbopack, Vite, Angular, Astro, SvelteKit, Nuxt, and React Router
 - `install/tunnel` — local fixture for direct `lpm tunnel` runs, covering auth-gated relay actions plus local `inspect`, `log`, and `replay` behavior from seeded on-disk webhook logs
 - `install/ports` — local fixture for direct `lpm ports` runs, covering declared-port listing, missing-port kill failures, live owner termination, and per-project `ports.toml` reset semantics
 - `install/cert` — local fixture for direct `lpm cert` runs, covering absent status, isolated trust-store install/uninstall, `generate --host` SAN refreshes, and the human-readable status blocks

@@ -6,10 +6,15 @@
 **/lpm.lock
 **/lpm.lockb
 **/dist/
+install/dev/real-world/**/.gitattributes
+install/dev/real-world/**/.gitignore
+install/dev/real-world/**/.angular/
 install/dev/real-world/**/.astro/
 install/dev/real-world/**/.cache/
 install/dev/real-world/**/.next/
 install/dev/real-world/**/.nuxt/
+install/dev/real-world/**/.output/
+install/dev/real-world/**/.react-router/
 install/dev/real-world/**/.svelte-kit/
 install/dev/real-world/**/build/
 install/dev/real-world/**/storybook-static/

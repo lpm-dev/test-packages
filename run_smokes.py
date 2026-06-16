@@ -2977,10 +2977,12 @@ def reset_dev_real_world_fixture(name: str) -> Path:
         fixture,
         extra_delete=[
             ".astro",
+            ".angular",
             ".cache",
             ".lpm-bin-realpath.json",
             ".next",
             ".nuxt",
+            ".react-router",
             ".svelte-kit",
             "build",
             "dist",
@@ -13743,6 +13745,100 @@ DEV_REAL_WORLD_SMOKES = (
 )
 
 
+ECOSYSTEM_BUILD_SMOKES = (
+    {
+        "name": "Next.js/Turbopack",
+        "fixture": "next-turbopack",
+        "content_path": "/",
+        "content": "LPM Next Turbopack smoke fixture",
+        "serve_command": [
+            "next",
+            "start",
+            "--port",
+            "{port}",
+            "--hostname",
+            "127.0.0.1",
+        ],
+        "timeout_seconds": 90,
+    },
+    {
+        "name": "Vite",
+        "fixture": "vite",
+        "content_path": "/",
+        "content": "LPM Vite smoke fixture",
+        "serve_command": [
+            "vite",
+            "preview",
+            "--port",
+            "{port}",
+            "--strictPort",
+            "--host",
+            "127.0.0.1",
+        ],
+    },
+    {
+        "name": "Angular",
+        "fixture": "angular",
+        "content_path": "/",
+        "content": None,
+        "static_dir_candidates": [
+            "dist/dev-real-angular-smoke/browser",
+            "dist/dev-real-angular-smoke",
+        ],
+    },
+    {
+        "name": "Astro",
+        "fixture": "astro",
+        "content_path": "/",
+        "content": "LPM Astro smoke fixture",
+        "serve_command": [
+            "astro",
+            "preview",
+            "--port",
+            "{port}",
+            "--host",
+            "127.0.0.1",
+        ],
+    },
+    {
+        "name": "SvelteKit",
+        "fixture": "sveltekit",
+        "content_path": "/",
+        "content": "LPM SvelteKit smoke fixture",
+        "serve_command": [
+            "vite",
+            "preview",
+            "--port",
+            "{port}",
+            "--strictPort",
+            "--host",
+            "127.0.0.1",
+        ],
+    },
+    {
+        "name": "Nuxt",
+        "fixture": "nuxt",
+        "content_path": "/",
+        "content": "LPM Nuxt smoke fixture",
+        "serve_command": [
+            "nuxt",
+            "preview",
+        ],
+        "timeout_seconds": 90,
+    },
+    {
+        "name": "React Router",
+        "fixture": "react-router",
+        "content_path": "/",
+        "content": "LPM React Router smoke fixture",
+        "serve_command": [
+            "react-router-serve",
+            "./build/server/index.js",
+        ],
+    },
+)
+
+
 def read_log_tail(path: Path, max_bytes: int = 24 * 1024) -> str:
     if not path.exists():
         return ""
@@ -13762,6 +13858,43 @@ def http_url(port: int, path: str) -> str:
 def fetch_text(url: str, timeout_seconds: float = 2.0) -> str:
     with urlopen(url, timeout=timeout_seconds) as response:
         return response.read().decode("utf-8", errors="replace")
+
+
+def fetch_status(url: str, timeout_seconds: float = 2.0) -> int:
+    with urlopen(url, timeout=timeout_seconds) as response:
+        return response.status
+
+
+def wait_for_http_ok(
+    label: str,
+    process: subprocess.Popen[object],
+    log_path: Path,
+    url: str,
+    timeout_seconds: float = 90.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error = "no response yet"
+
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            raise SmokeFailure(
+                f"{label}: server exited with code {process.returncode} before {url} responded.\n"
+                f"{read_log_tail(log_path)}"
+            )
+        try:
+            status = fetch_status(url)
+            if 200 <= status < 400:
+                return
+            last_error = f"HTTP {status}"
+        except Exception as error:
+            last_error = repr(error)
+        time.sleep(0.25)
+
+    raise SmokeFailure(
+        f"{label}: timed out waiting for non-error response from {url}; "
+        f"last_error={last_error}.\n"
+        f"{read_log_tail(log_path)}"
+    )
 
 
 def wait_for_http_text(
@@ -13848,6 +13981,161 @@ def project_bin_path(project_dir: Path, bin_name: str) -> Path:
         if candidate.exists() or candidate.is_symlink():
             return candidate
     return bin_dir / bin_name
+
+
+def env_with_project_bin(
+    project_dir: Path,
+    extra_env: dict[str, str | None] | None = None,
+) -> dict[str, str]:
+    env = merged_env(extra_env)
+    bin_dir = str(project_dir / "node_modules" / ".bin")
+    existing_path = env.get("PATH")
+    env["PATH"] = bin_dir if not existing_path else f"{bin_dir}{os.pathsep}{existing_path}"
+    return env
+
+
+def package_script(project_dir: Path, script_name: str) -> str:
+    manifest_path = project_dir / "package.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    scripts = manifest.get("scripts")
+    if not isinstance(scripts, dict):
+        raise SmokeFailure(f"{manifest_path}: expected scripts object")
+    script = scripts.get(script_name)
+    if not isinstance(script, str) or not script:
+        raise SmokeFailure(f"{manifest_path}: expected non-empty {script_name!r} script")
+    return script
+
+
+def shell_command_args(script: str) -> list[str]:
+    if os.name == "posix":
+        return ["/bin/sh", "-c", script]
+    shell = os.environ.get("COMSPEC", "cmd.exe")
+    return [shell, "/d", "/s", "/c", script]
+
+
+def run_package_script_direct(
+    label: str,
+    project_dir: Path,
+    script_name: str,
+    extra_env: dict[str, str | None] | None = None,
+) -> str:
+    script = package_script(project_dir, script_name)
+    args = shell_command_args(script)
+    log(f"{label}: {script}")
+    result = subprocess.run(
+        args,
+        cwd=project_dir,
+        env=env_with_project_bin(project_dir, extra_env),
+        capture_output=True,
+        text=True,
+    )
+    if result.stdout:
+        sys.stdout.write(result.stdout)
+    if result.stderr:
+        sys.stderr.write(result.stderr)
+    combined = result.stdout + result.stderr
+    if result.returncode != 0:
+        raise SmokeFailure(
+            f"{label} failed with exit code {result.returncode}.\n{combined[-24 * 1024:]}"
+        )
+    return combined
+
+
+def resolve_static_dir(project_dir: Path, candidates: list[str]) -> Path:
+    for candidate in candidates:
+        path = project_dir / candidate
+        if path.is_dir():
+            return path
+    raise SmokeFailure(
+        f"expected one static output directory to exist under {project_dir}: {candidates!r}"
+    )
+
+
+def run_ecosystem_build_server(
+    case: dict[str, object],
+    project_dir: Path,
+    extra_env: dict[str, str | None],
+    port: int,
+) -> str:
+    label = f"install/ecosystem-build {case['name']} serve"
+    command_tokens = case.get("serve_command")
+    if isinstance(command_tokens, list):
+        args = [
+            str(token).replace("{port}", str(port))
+            for token in command_tokens
+        ]
+        program = project_bin_path(project_dir, args[0])
+        command = [str(program), *args[1:]]
+    else:
+        static_candidates = case.get("static_dir_candidates")
+        if not isinstance(static_candidates, list):
+            raise SmokeFailure(f"{label}: expected serve_command or static_dir_candidates")
+        static_dir = resolve_static_dir(project_dir, [str(item) for item in static_candidates])
+        command = [
+            sys.executable,
+            "-m",
+            "http.server",
+            str(port),
+            "--bind",
+            "127.0.0.1",
+            "--directory",
+            str(static_dir),
+        ]
+
+    log(f"{label}: {' '.join(command)}")
+    log_file = tempfile.NamedTemporaryFile(
+        prefix=f"lpm-{case['fixture']}-ecosystem-",
+        suffix=".log",
+        mode="w",
+        encoding="utf-8",
+        delete=False,
+    )
+    log_path = Path(log_file.name)
+    popen_kwargs: dict[str, object] = {}
+    if os.name == "posix":
+        popen_kwargs["start_new_session"] = True
+
+    env = env_with_project_bin(project_dir, extra_env)
+    env["PORT"] = str(port)
+    env["HOST"] = "127.0.0.1"
+
+    process = subprocess.Popen(
+        command,
+        cwd=project_dir,
+        env=env,
+        stdout=log_file,
+        stderr=subprocess.STDOUT,
+        text=True,
+        **popen_kwargs,
+    )
+
+    try:
+        content_path = str(case["content_path"])
+        timeout_seconds = float(case.get("timeout_seconds", 90))
+        expected_content = case.get("content")
+        if isinstance(expected_content, str):
+            wait_for_http_text(
+                label,
+                process,
+                log_path,
+                http_url(port, content_path),
+                expected_content,
+                timeout_seconds=timeout_seconds,
+            )
+        else:
+            wait_for_http_ok(
+                label,
+                process,
+                log_path,
+                http_url(port, content_path),
+                timeout_seconds=timeout_seconds,
+            )
+    finally:
+        serve_log = stop_dev_process(process, label, log_path)
+        log_file.close()
+
+    delete_path(log_path)
+    return serve_log
 
 
 def require_dev_bin_realpath_under_compat(
@@ -14029,6 +14317,66 @@ def scenario_install_dev_real_world_command() -> None:
                 "Preparing dev tool compatibility",
                 f"install/dev-real-world {case['name']} relink log",
             )
+
+
+def scenario_install_ecosystem_build_command() -> None:
+    failures: list[str] = []
+    for case in ECOSYSTEM_BUILD_SMOKES:
+        try:
+            fixture = reset_dev_real_world_fixture(str(case["fixture"])).resolve()
+            with temporary_smoke_home(
+                prefix=f"lpm-ecosystem-{case['fixture']}-home-"
+            ) as home_root:
+                scenario_env = smoke_home_env(
+                    home_root,
+                    LPM_FORCE_FILE_AUTH="1",
+                    LPM_FORCE_FILE_VAULT="1",
+                    LPM_STORE_VERSION="v2",
+                )
+                install_output = run_command(
+                    f"install/ecosystem-build {case['name']} install",
+                    fixture,
+                    [
+                        str(LPM_BIN),
+                        "install",
+                        "--no-security-summary",
+                        "--no-skills",
+                        "--no-editor-setup",
+                    ],
+                    extra_env=scenario_env,
+                )
+                require_not_contains(
+                    install_output,
+                    "skipping invalid dep name",
+                    f"install/ecosystem-build {case['name']} install metadata warnings",
+                )
+                require_exists(fixture / ".lpm" / "install-hash")
+
+                run_package_script_direct(
+                    f"install/ecosystem-build {case['name']} build",
+                    fixture,
+                    "build",
+                    extra_env=scenario_env,
+                )
+                run_ecosystem_build_server(
+                    case,
+                    fixture,
+                    scenario_env,
+                    reserve_then_release_port(),
+                )
+                log(f"install/ecosystem-build {case['name']} passed")
+        except SmokeFailure as error:
+            message = str(error)
+            if len(message) > 4096:
+                message = f"{message[:4096]}\n... truncated ..."
+            failures.append(f"{case['name']}: {message}")
+            log(f"install/ecosystem-build {case['name']} FAILED")
+
+    if failures:
+        raise SmokeFailure(
+            "install/ecosystem-build failed for "
+            f"{len(failures)} stack(s):\n\n" + "\n\n".join(failures)
+        )
 
 
 def scenario_install_dev_command() -> None:
@@ -26431,6 +26779,10 @@ SCENARIOS = {
         "Run heavy real-framework lpm dev coverage for v2 dev-entrypoint compatibility relinking across Next/Turbopack, Vite, Astro, Webpack dev server, Remix, Nuxt, SvelteKit, and Storybook.",
         scenario_install_dev_real_world_command,
     ),
+    "install-ecosystem-build": (
+        "Run heavy real-framework install/build/runtime coverage by building installed apps directly and serving production outputs across Next/Turbopack, Vite, Angular, Astro, SvelteKit, Nuxt, and React Router.",
+        scenario_install_ecosystem_build_command,
+    ),
     "install-lpx": (
         "Run the lpx executable alias through the dlx cache-hit and malformed-spec contracts.",
         scenario_install_lpx_command,
@@ -26777,6 +27129,10 @@ SCENARIOS = {
     ),
 }
 
+OPT_IN_SCENARIOS = {
+    "install-ecosystem-build",
+}
+
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run live smoke scenarios in test-packages.")
@@ -26784,7 +27140,7 @@ def parse_args() -> argparse.Namespace:
         "scenarios",
         nargs="*",
         default=["all"],
-        help="Scenario names to run. Use 'all' for every scenario.",
+        help="Scenario names to run. Use 'all' for every non-opt-in scenario.",
     )
     parser.add_argument("--list", action="store_true", help="List available scenarios and exit.")
     return parser.parse_args()
@@ -26795,12 +27151,13 @@ def main() -> int:
 
     if args.list:
         for name, (description, _) in SCENARIOS.items():
-            print(f"{name}: {description}")
+            opt_in = " [opt-in]" if name in OPT_IN_SCENARIOS else ""
+            print(f"{name}{opt_in}: {description}")
         return 0
 
     requested = args.scenarios
     if "all" in requested:
-        selected = list(SCENARIOS.keys())
+        selected = [name for name in SCENARIOS if name not in OPT_IN_SCENARIOS]
     else:
         selected = requested
 

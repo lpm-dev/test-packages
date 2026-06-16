@@ -4,7 +4,8 @@
     "version": "0.0.0",
     "type": "module",
     "scripts": {
-        "dev": "vite dev --host 127.0.0.1 --port $PORT --strictPort"
+        "dev": "vite dev --host 127.0.0.1 --port $PORT --strictPort",
+        "build": "vite build"
     },
     "dependencies": {
         "@sveltejs/adapter-auto": "3.3.1",
