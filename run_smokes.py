@@ -16869,7 +16869,7 @@ def scenario_install_dlx_command() -> None:
             raise SmokeFailure(f"{label}: expected top-level JSON object")
         return payload
 
-    with tempfile.TemporaryDirectory(prefix="lpm-dlx-cache-hit-home-") as home_root, tempfile.TemporaryDirectory(
+    with temporary_smoke_home(prefix="lpm-dlx-cache-hit-home-") as home_root, tempfile.TemporaryDirectory(
         prefix="lpm-dlx-cache-hit-project-"
     ) as project_root:
         lpm_home = Path(home_root) / ".lpm"
@@ -16930,7 +16930,7 @@ def scenario_install_dlx_command() -> None:
                 "install/dlx cache hit: expected the cache entry mtime to remain unchanged on cache hit"
             )
 
-    with tempfile.TemporaryDirectory(prefix="lpm-dlx-malformed-home-") as home_root, tempfile.TemporaryDirectory(
+    with temporary_smoke_home(prefix="lpm-dlx-malformed-home-") as home_root, tempfile.TemporaryDirectory(
         prefix="lpm-dlx-malformed-project-"
     ) as project_root:
         env = smoke_home_env(home_root)
@@ -17045,7 +17045,7 @@ def scenario_install_lpx_command() -> None:
             os.chmod(alias_path, os.stat(alias_path).st_mode | 0o111)
         return alias_path
 
-    with tempfile.TemporaryDirectory(prefix="lpm-lpx-cache-hit-home-") as home_root, tempfile.TemporaryDirectory(
+    with temporary_smoke_home(prefix="lpm-lpx-cache-hit-home-") as home_root, tempfile.TemporaryDirectory(
         prefix="lpm-lpx-cache-hit-project-"
     ) as project_root:
         lpm_home = Path(home_root) / ".lpm"
@@ -17111,7 +17111,7 @@ def scenario_install_lpx_command() -> None:
                 "install/lpx cache hit package.json: expected the project manifest to stay unchanged"
             )
 
-    with tempfile.TemporaryDirectory(prefix="lpm-lpx-malformed-home-") as home_root, tempfile.TemporaryDirectory(
+    with temporary_smoke_home(prefix="lpm-lpx-malformed-home-") as home_root, tempfile.TemporaryDirectory(
         prefix="lpm-lpx-malformed-project-"
     ) as project_root:
         env = smoke_home_env(home_root, LPM_NPM_ROUTE="proxy")
@@ -22195,6 +22195,24 @@ def scenario_install_publish_command() -> None:
             write_publish_package(oidc_fallback_path, "oidc-fallback-publish-pkg")
             registry_base = registry.registry_url.rstrip("/")
             write_publish_npm_config(oidc_fallback_path, registry=registry_base)
+            seed_custom_registry_token = run_command_result(
+                "install/publish npm oidc fallback seed registry token",
+                oidc_fallback_path,
+                [
+                    str(LPM_BIN),
+                    "login",
+                    "--login-registry",
+                    registry_base,
+                    "--token",
+                    fallback_npm_token,
+                ],
+                extra_env=common_env,
+            )
+            if seed_custom_registry_token.returncode != 0:
+                raise SmokeFailure(
+                    "install/publish npm oidc fallback seed registry token failed with exit code "
+                    f"{seed_custom_registry_token.returncode}"
+                )
             oidc_fallback_result = run_command_result(
                 "install/publish npm oidc fallback to token",
                 oidc_fallback_path,
