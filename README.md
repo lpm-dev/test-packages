@@ -13,6 +13,11 @@ Use `python3 run_smokes.py install-dev-real-world` to run the heavy real-framewo
 `lpm dev` smoke suite for v2 dev-entrypoint compatibility across Next/Turbopack,
 Vite, Astro, Webpack dev server, Remix, Nuxt, SvelteKit, and Storybook.
 
+The runner uses the debug `target/debug/lpm-rs` binary by default for fast
+iteration. Use `LPM_SMOKE_PROFILE=release python3 run_smokes.py install-dev-real-world`
+when measuring heavy real-framework runtime, or set `LPM_SMOKE_BIN=/path/to/lpm-rs`
+to run a prebuilt binary without rebuilding.
+
 Use `python3 run_smokes.py install-ecosystem-build` to run the separate opt-in
 heavy installed-app build/runtime canary across Next/Turbopack, Vite, Angular,
 Astro, SvelteKit, Nuxt, and React Router.
