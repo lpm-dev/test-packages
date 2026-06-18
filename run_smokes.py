@@ -67,7 +67,23 @@ def resolve_cargo_target_dir() -> Path:
 
 
 LPM_TARGET_DIR = resolve_cargo_target_dir()
-LPM_BIN = LPM_TARGET_DIR / "debug" / "lpm-rs"
+LPM_SMOKE_BIN_OVERRIDE = os.environ.get("LPM_SMOKE_BIN")
+LPM_SMOKE_PROFILE = os.environ.get("LPM_SMOKE_PROFILE", "debug").strip().lower()
+
+
+def resolve_lpm_binary() -> Path:
+    configured = LPM_SMOKE_BIN_OVERRIDE
+    if configured:
+        configured_path = Path(configured).expanduser()
+        if configured_path.is_absolute():
+            return configured_path.resolve()
+        return (Path.cwd() / configured_path).resolve()
+
+    profile_dir = "release" if LPM_SMOKE_PROFILE == "release" else "debug"
+    return LPM_TARGET_DIR / profile_dir / "lpm-rs"
+
+
+LPM_BIN = resolve_lpm_binary()
 
 DEFAULT_ENV = {
     "NO_COLOR": "1",
@@ -3912,17 +3928,32 @@ def require_directory_empty_or_absent(path: Path, context: str) -> None:
 
 
 def ensure_lpm_binary() -> None:
+    if LPM_SMOKE_BIN_OVERRIDE:
+        require_exists(LPM_BIN)
+        log(f"using configured lpm binary: {LPM_BIN}")
+        return
+
+    if LPM_SMOKE_PROFILE not in {"debug", "release"}:
+        raise SmokeFailure(
+            "LPM_SMOKE_PROFILE must be 'debug' or 'release' "
+            f"(got {LPM_SMOKE_PROFILE!r})"
+        )
+
+    command = [
+        "cargo",
+        "build",
+        "--manifest-path",
+        str(LPM_MANIFEST),
+        "-p",
+        "lpm-cli",
+    ]
+    if LPM_SMOKE_PROFILE == "release":
+        command.insert(2, "--release")
+
     run_command(
-        "build lpm-cli",
+        f"build lpm-cli ({LPM_SMOKE_PROFILE})",
         RUST_CLIENT_ROOT,
-        [
-            "cargo",
-            "build",
-            "--manifest-path",
-            str(LPM_MANIFEST),
-            "-p",
-            "lpm-cli",
-        ],
+        command,
     )
     require_exists(LPM_BIN)
 
