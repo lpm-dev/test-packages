@@ -14735,20 +14735,11 @@ def scenario_install_dev_command() -> None:
         tunnel_relay_port = reserve_then_release_port()
 
         with tempfile.TemporaryDirectory(prefix="lpm-smoke-dev-tunnel-") as tunnel_home:
-            tunnel_home_path = Path(tunnel_home)
             tunnel_registry_url = f"http://127.0.0.1:{tunnel_registry_port}"
             tunnel_env = smoke_home_env(
                 tunnel_home,
-                LPM_FORCE_FILE_AUTH="1",
-                LPM_TEST_FAST_SCRYPT="1",
+                LPM_TOKEN="at-dev-tunnel",
                 LPM_TUNNEL_RELAY=f"ws://127.0.0.1:{tunnel_relay_port}/connect",
-            )
-            seed_refresh_backed_session(
-                tunnel_env,
-                tunnel_registry_url,
-                "at-dev-tunnel",
-                "rt-dev-tunnel",
-                "2099-01-01T00:00:00Z",
             )
 
             with FakeTunnelRelay(
@@ -14861,7 +14852,7 @@ def scenario_install_dev_command() -> None:
                 )
             if relay.request_headers.get("authorization") != "Bearer at-dev-tunnel":
                 raise SmokeFailure(
-                    "install/dev tunnel inspector: expected the relay handshake to carry the seeded bearer token"
+                    "install/dev tunnel inspector: expected the relay handshake to carry the loopback bearer token"
                 )
             if relay.request_headers.get("x-tunnel-auth") is not None:
                 raise SmokeFailure(
@@ -14880,24 +14871,15 @@ def scenario_install_dev_command() -> None:
         tunnel_auth_relay_port = reserve_then_release_port()
 
         with tempfile.TemporaryDirectory(prefix="lpm-smoke-dev-tunnel-auth-") as tunnel_auth_home:
-            tunnel_auth_home_path = Path(tunnel_auth_home)
             tunnel_auth_registry_url = (
                 f"http://127.0.0.1:{tunnel_auth_registry_port}"
             )
             tunnel_auth_env = smoke_home_env(
                 tunnel_auth_home,
-                LPM_FORCE_FILE_AUTH="1",
-                LPM_TEST_FAST_SCRYPT="1",
+                LPM_TOKEN="at-dev-tunnel-auth",
                 LPM_TUNNEL_RELAY=(
                     f"ws://127.0.0.1:{tunnel_auth_relay_port}/connect"
                 ),
-            )
-            seed_refresh_backed_session(
-                tunnel_auth_env,
-                tunnel_auth_registry_url,
-                "at-dev-tunnel-auth",
-                "rt-dev-tunnel-auth",
-                "2099-01-01T00:00:00Z",
             )
 
             with FakeTunnelRelay(
@@ -14983,7 +14965,7 @@ def scenario_install_dev_command() -> None:
             )
             if relay.request_headers.get("authorization") != "Bearer at-dev-tunnel-auth":
                 raise SmokeFailure(
-                    "install/dev tunnel-auth: expected the relay handshake to carry the seeded bearer token"
+                    "install/dev tunnel-auth: expected the relay handshake to carry the loopback bearer token"
                 )
             if relay.request_headers.get("x-tunnel-auth") != tunnel_auth_token:
                 raise SmokeFailure(
@@ -15000,24 +14982,15 @@ def scenario_install_dev_command() -> None:
         tunnel_no_inspect_relay_port = reserve_then_release_port()
 
         with tempfile.TemporaryDirectory(prefix="lpm-smoke-dev-tunnel-no-inspect-") as tunnel_no_inspect_home:
-            tunnel_no_inspect_home_path = Path(tunnel_no_inspect_home)
             tunnel_no_inspect_registry_url = (
                 f"http://127.0.0.1:{tunnel_no_inspect_registry_port}"
             )
             tunnel_no_inspect_env = smoke_home_env(
                 tunnel_no_inspect_home,
-                LPM_FORCE_FILE_AUTH="1",
-                LPM_TEST_FAST_SCRYPT="1",
+                LPM_TOKEN="at-dev-tunnel-no-inspect",
                 LPM_TUNNEL_RELAY=(
                     f"ws://127.0.0.1:{tunnel_no_inspect_relay_port}/connect"
                 ),
-            )
-            seed_refresh_backed_session(
-                tunnel_no_inspect_env,
-                tunnel_no_inspect_registry_url,
-                "at-dev-tunnel-no-inspect",
-                "rt-dev-tunnel-no-inspect",
-                "2099-01-01T00:00:00Z",
             )
 
             tunnel_no_inspect_args = [
@@ -15113,22 +15086,13 @@ def scenario_install_dev_command() -> None:
         tunnel_strict_relay_port = reserve_then_release_port()
 
         with tempfile.TemporaryDirectory(prefix="lpm-smoke-dev-tunnel-strict-") as tunnel_strict_home:
-            tunnel_strict_home_path = Path(tunnel_strict_home)
             tunnel_strict_registry_url = (
                 f"http://127.0.0.1:{tunnel_strict_registry_port}"
             )
             tunnel_strict_env = smoke_home_env(
                 tunnel_strict_home,
-                LPM_FORCE_FILE_AUTH="1",
-                LPM_TEST_FAST_SCRYPT="1",
+                LPM_TOKEN="at-dev-tunnel-strict",
                 LPM_TUNNEL_RELAY=f"ws://127.0.0.1:{tunnel_strict_relay_port}/connect",
-            )
-            seed_refresh_backed_session(
-                tunnel_strict_env,
-                tunnel_strict_registry_url,
-                "at-dev-tunnel-strict",
-                "rt-dev-tunnel-strict",
-                "2099-01-01T00:00:00Z",
             )
 
             with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied_inspector:
