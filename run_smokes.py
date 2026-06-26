@@ -7571,7 +7571,7 @@ def scenario_install_peer_deps() -> None:
         },
     ]
 
-    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+    with MockRegistry(registry_packages) as registry, temporary_smoke_home(
         prefix="lpm-smoke-home-"
     ) as home_root:
         scenario_env = smoke_home_env(home_root, LPM_STORE_VERSION="v2")
@@ -8041,7 +8041,7 @@ def scenario_install_optional_deps_hard_mode() -> None:
                     "--ttl",
                     "10m",
                 ],
-                prompts=[],
+                prompts=[("will be allowed for this project", "y\n")],
                 extra_env=unlock_env,
             )
             require_contains(
@@ -8579,7 +8579,7 @@ def scenario_install_script_policy() -> None:
                     "--ttl",
                     "10m",
                 ],
-                prompts=[],
+                prompts=[("will be allowed for this project", "y\n")],
                 extra_env=unlock_env,
             )
             require_contains(
@@ -9366,7 +9366,7 @@ def scenario_install_security() -> None:
                     "--ttl",
                     "10m",
                 ],
-                prompts=[],
+                prompts=[("will be allowed for this project", "y\n")],
                 extra_env=scenario_env,
             )
             require_contains(
@@ -20498,7 +20498,7 @@ def scenario_install_whoami_command() -> None:
         )
         require_contains(
             auth_result.stderr,
-            "email          test@example.com",
+            "email          t...t@example.com",
             "install/whoami authenticated email row",
         )
         require_contains(
@@ -21754,6 +21754,26 @@ def scenario_install_publish_command() -> None:
             "ACTIONS_ID_TOKEN_REQUEST_TOKEN": actions_id_token_request_token,
         }
 
+    def publish_provenance_clean_env(base_env: dict[str, str]) -> dict[str, str | None]:
+        return {
+            **base_env,
+            "NPM_TOKEN": None,
+            "NPM_ID_TOKEN": None,
+            "SIGSTORE_ID_TOKEN": None,
+            "LPM_OIDC_TOKEN": None,
+            "LPM_GITLAB_OIDC_TOKEN": None,
+            "ACTIONS_ID_TOKEN_REQUEST_URL": None,
+            "ACTIONS_ID_TOKEN_REQUEST_TOKEN": None,
+            "GITHUB_ACTIONS": None,
+            "GITLAB_CI": None,
+            "CI_JOB_JWT": None,
+            "CI_JOB_JWT_V2": None,
+            "NPM_CONFIG_PROVENANCE": None,
+            "npm_config_provenance": None,
+            "NPM_CONFIG_PROVENANCE_FILE": None,
+            "npm_config_provenance_file": None,
+        }
+
     npm_id_token = "publish-oidc-id-token"
     oidc_npm_token = "publish-oidc-exchanged-token"
     github_runtime_request_token = "publish-gha-request-token"
@@ -22031,6 +22051,128 @@ def scenario_install_publish_command() -> None:
             if registry.request_details():
                 raise SmokeFailure(
                     "install/publish npm dry run json: expected no registry requests during dry run"
+                )
+
+        with tempfile.TemporaryDirectory(
+            prefix="lpm-publish-provenance-dry-run-"
+        ) as provenance_dry_run_project, MockRegistry([]) as registry:
+            provenance_dry_run_path = Path(provenance_dry_run_project)
+            write_publish_package(
+                provenance_dry_run_path,
+                "provenance-dry-run-pkg",
+            )
+            registry_base = registry.registry_url.rstrip("/")
+            write_publish_npm_config(provenance_dry_run_path, registry=registry_base)
+            provenance_dry_run_result = run_command_result(
+                "install/publish npm provenance dry run json",
+                provenance_dry_run_path,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "publish",
+                    "--dry-run",
+                    "--yes",
+                    "--npm",
+                    "--provenance",
+                ],
+                extra_env=publish_provenance_clean_env(common_env),
+            )
+            if provenance_dry_run_result.returncode != 0:
+                raise SmokeFailure(
+                    "install/publish npm provenance dry run json failed with exit code "
+                    f"{provenance_dry_run_result.returncode}"
+                )
+            provenance_dry_run_envelope = parse_json_stdout(
+                "install/publish npm provenance dry run json",
+                provenance_dry_run_result,
+            )
+            if provenance_dry_run_envelope.get("success") is not True:
+                raise SmokeFailure(
+                    "install/publish npm provenance dry run json: expected success=true"
+                )
+            if provenance_dry_run_envelope.get("dry_run") is not True:
+                raise SmokeFailure(
+                    "install/publish npm provenance dry run json: expected dry_run=true"
+                )
+            if registry.request_details():
+                raise SmokeFailure(
+                    "install/publish npm provenance dry run json: expected no registry requests during dry run"
+                )
+
+        with tempfile.TemporaryDirectory(
+            prefix="lpm-publish-provenance-no-oidc-"
+        ) as no_oidc_project, MockRegistry(
+            [],
+            extra_method_routes={
+                ("PUT", "/provenance-requires-oidc-pkg"): (
+                    201,
+                    "application/json",
+                    encode_json({}),
+                ),
+            },
+        ) as registry:
+            no_oidc_path = Path(no_oidc_project)
+            write_publish_package(no_oidc_path, "provenance-requires-oidc-pkg")
+            registry_base = registry.registry_url.rstrip("/")
+            write_publish_npm_config(no_oidc_path, registry=registry_base)
+            seed_registry_token = run_command_result(
+                "install/publish npm provenance no oidc seed registry token",
+                no_oidc_path,
+                [
+                    str(LPM_BIN),
+                    "login",
+                    "--login-registry",
+                    registry_base,
+                    "--token",
+                    "provenance-registry-token",
+                ],
+                extra_env=publish_provenance_clean_env(common_env),
+            )
+            if seed_registry_token.returncode != 0:
+                raise SmokeFailure(
+                    "install/publish npm provenance no oidc seed registry token failed with exit code "
+                    f"{seed_registry_token.returncode}"
+                )
+            no_oidc_result = run_command_result(
+                "install/publish npm provenance without oidc",
+                no_oidc_path,
+                [
+                    str(LPM_BIN),
+                    "publish",
+                    "--npm",
+                    "--yes",
+                    "--provenance",
+                ],
+                extra_env=publish_provenance_clean_env(common_env),
+            )
+            if no_oidc_result.returncode == 0:
+                raise SmokeFailure(
+                    "install/publish npm provenance without oidc: expected a non-zero exit"
+                )
+            no_oidc_combined = no_oidc_result.stdout + no_oidc_result.stderr
+            require_contains(
+                no_oidc_combined,
+                "--provenance requires",
+                "install/publish npm provenance without oidc guidance",
+            )
+            if not any(
+                needle in no_oidc_combined
+                for needle in [
+                    "Sigstore-audience OIDC",
+                    "permissions: id-token: write",
+                    "SIGSTORE_ID_TOKEN",
+                ]
+            ):
+                raise SmokeFailure(
+                    "install/publish npm provenance without oidc: expected CI OIDC setup guidance"
+                )
+            publish_requests = registry.request_details(
+                method="PUT",
+                path="/provenance-requires-oidc-pkg",
+            )
+            if publish_requests:
+                raise SmokeFailure(
+                    "install/publish npm provenance without oidc: expected no publish upload request"
                 )
 
         with tempfile.TemporaryDirectory(prefix="lpm-publish-oidc-runtime-") as oidc_runtime_project, MockRegistry(
@@ -26889,7 +27031,7 @@ SCENARIOS = {
         scenario_install_deploy_command,
     ),
     "install-publish": (
-        "Run lpm publish coverage for dry-run validation, target planning, mock-registry success, and catalog dependency rewrites inside uploaded tarballs.",
+        "Run lpm publish coverage for dry-run validation, target planning, provenance no-network/no-OIDC guards, mock-registry success, and catalog dependency rewrites inside uploaded tarballs.",
         scenario_install_publish_command,
     ),
     "install-stage": (
