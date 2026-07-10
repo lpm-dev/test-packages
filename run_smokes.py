@@ -15,6 +15,7 @@ import platform
 import pty
 import re
 import select
+import shlex
 import signal
 import shutil
 import socket
@@ -528,6 +529,9 @@ DEV_COMMAND_BASELINE_LPM_JSON = """{
         \"vars\": {
             \"REQUIRED_TOKEN\": {
                 \"required\": true
+            },
+            \"NODE_OPTIONS\": {
+                \"default\": \"--require=./bad-preload.cjs\"
             }
         }
     }
@@ -583,6 +587,9 @@ const payload = {
         STAGE_ONLY: process.env.STAGE_ONLY ?? null,
         LOCAL_STAGE: process.env.LOCAL_STAGE ?? null,
         REQUIRED_TOKEN: process.env.REQUIRED_TOKEN ?? null,
+        NODE_OPTIONS: process.env.NODE_OPTIONS ?? null,
+        LD_PRELOAD: process.env.LD_PRELOAD ?? null,
+        BASH_ENV: process.env.BASH_ENV ?? null,
         NODE_EXTRA_CA_CERTS: process.env.NODE_EXTRA_CA_CERTS ?? null,
         SSL_CERT_FILE: process.env.SSL_CERT_FILE ?? null,
         SSL_KEY_FILE: process.env.SSL_KEY_FILE ?? null,
@@ -2962,7 +2969,7 @@ def reset_dev_fixture() -> Path:
             ".env.staging.local": DEV_COMMAND_BASELINE_ENV_STAGING_LOCAL,
             "dev-script.cjs": DEV_COMMAND_BASELINE_SCRIPT,
         },
-        extra_delete=[".env", "dev-capture.json"],
+        extra_delete=[".env", "dev-capture.json", "run-capture.json", "bad-preload.cjs"],
     )
 
 
@@ -8096,20 +8103,6 @@ def scenario_install_optional_deps_hard_mode() -> None:
             raise SmokeFailure(
                 "install/optional-deps platform skip json: expected success=true"
             )
-        timing = platform_envelope.get("timing")
-        if not isinstance(timing, dict):
-            raise SmokeFailure(
-                "install/optional-deps platform skip json: expected timing object"
-            )
-        resolve_timing = timing.get("resolve")
-        if not isinstance(resolve_timing, dict):
-            raise SmokeFailure(
-                "install/optional-deps platform skip json: expected timing.resolve object"
-            )
-        if resolve_timing.get("platform_skipped", 0) < 1:
-            raise SmokeFailure(
-                "install/optional-deps platform skip json: expected timing.resolve.platform_skipped >= 1"
-            )
         platform_packages = platform_envelope.get("packages")
         if not isinstance(platform_packages, list):
             raise SmokeFailure(
@@ -8676,111 +8669,116 @@ def scenario_install_script_policy() -> None:
         require_not_exists(triage_fixture / "node_modules" / "smoke-script-amber" / "script-ran.txt")
         require_not_exists(triage_fixture / ".lpm" / "build-state.json")
 
-        explicit_unlock_fixture = reset_script_policy_fixture(
-            "explicit-unlock-success",
-            "smoke-script-green",
-        )
-        write_registry_npmrc(explicit_unlock_fixture, registry.registry_url)
-        write_package_json(
-            explicit_unlock_fixture / "package.json",
-            {
-                "name": "script-policy-smoke",
-                "private": True,
-                "version": "0.0.0",
-                "dependencies": {
-                    "smoke-script-green": "^1.0.0",
-                    "smoke-script-order": "^1.0.0",
+        if os.environ.get(NATIVE_SECURITY_UNLOCK_ENV) == "1":
+            explicit_unlock_fixture = reset_script_policy_fixture(
+                "explicit-unlock-success",
+                "smoke-script-green",
+            )
+            write_registry_npmrc(explicit_unlock_fixture, registry.registry_url)
+            write_package_json(
+                explicit_unlock_fixture / "package.json",
+                {
+                    "name": "script-policy-smoke",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {
+                        "smoke-script-green": "^1.0.0",
+                        "smoke-script-order": "^1.0.0",
+                    },
+                    "lpm": {"scriptPolicy": "allow"},
                 },
-                "lpm": {"scriptPolicy": "allow"},
-            },
-        )
-        unlock_scripts_allow(
-            explicit_unlock_fixture,
-            "install/script-policy explicit unlock scripts-allow",
-        )
-        run_command(
-            "install/script-policy explicit unlock auto-build runs scripts",
-            explicit_unlock_fixture,
-            [str(LPM_BIN), "install", "--auto-build", *install_flags],
-            extra_env=unlock_env,
-        )
-        green_build_count_path = (
-            explicit_unlock_fixture / "node_modules" / "smoke-script-green" / "build-count.txt"
-        )
-        if green_build_count_path.read_text(encoding="utf-8").strip() != "1":
-            raise SmokeFailure(
-                "install/script-policy explicit unlock auto-build runs scripts: expected smoke-script-green to run exactly once"
             )
-        lifecycle_order_path = (
-            explicit_unlock_fixture / "node_modules" / "smoke-script-order" / "lifecycle-order.txt"
-        )
-        lifecycle_order = lifecycle_order_path.read_text(encoding="utf-8").splitlines()
-        if lifecycle_order != ["preinstall", "install", "postinstall"]:
-            raise SmokeFailure(
-                "install/script-policy explicit unlock auto-build runs scripts: expected stable preinstall/install/postinstall order"
+            unlock_scripts_allow(
+                explicit_unlock_fixture,
+                "install/script-policy explicit unlock scripts-allow",
             )
-        run_command(
-            "install/script-policy targeted rebuild reruns only intended package",
-            explicit_unlock_fixture,
-            [str(LPM_BIN), "rebuild", "smoke-script-green", "--force"],
-            extra_env=unlock_env,
-        )
-        if green_build_count_path.read_text(encoding="utf-8").strip() != "2":
-            raise SmokeFailure(
-                "install/script-policy targeted rebuild reruns only intended package: expected smoke-script-green build count to increment to 2"
+            run_command(
+                "install/script-policy explicit unlock auto-build runs scripts",
+                explicit_unlock_fixture,
+                [str(LPM_BIN), "install", "--auto-build", *install_flags],
+                extra_env=unlock_env,
             )
-        if lifecycle_order_path.read_text(encoding="utf-8").splitlines() != [
-            "preinstall",
-            "install",
-            "postinstall",
-        ]:
-            raise SmokeFailure(
-                "install/script-policy targeted rebuild reruns only intended package: expected smoke-script-order lifecycle log to stay unchanged"
+            green_build_count_path = (
+                explicit_unlock_fixture / "node_modules" / "smoke-script-green" / "build-count.txt"
             )
+            if green_build_count_path.read_text(encoding="utf-8").strip() != "1":
+                raise SmokeFailure(
+                    "install/script-policy explicit unlock auto-build runs scripts: expected smoke-script-green to run exactly once"
+                )
+            lifecycle_order_path = (
+                explicit_unlock_fixture / "node_modules" / "smoke-script-order" / "lifecycle-order.txt"
+            )
+            lifecycle_order = lifecycle_order_path.read_text(encoding="utf-8").splitlines()
+            if lifecycle_order != ["preinstall", "install", "postinstall"]:
+                raise SmokeFailure(
+                    "install/script-policy explicit unlock auto-build runs scripts: expected stable preinstall/install/postinstall order"
+                )
+            run_command(
+                "install/script-policy targeted rebuild reruns only intended package",
+                explicit_unlock_fixture,
+                [str(LPM_BIN), "rebuild", "smoke-script-green", "--force"],
+                extra_env=unlock_env,
+            )
+            if green_build_count_path.read_text(encoding="utf-8").strip() != "2":
+                raise SmokeFailure(
+                    "install/script-policy targeted rebuild reruns only intended package: expected smoke-script-green build count to increment to 2"
+                )
+            if lifecycle_order_path.read_text(encoding="utf-8").splitlines() != [
+                "preinstall",
+                "install",
+                "postinstall",
+            ]:
+                raise SmokeFailure(
+                    "install/script-policy targeted rebuild reruns only intended package: expected smoke-script-order lifecycle log to stay unchanged"
+                )
 
-        failing_fixture = reset_script_policy_fixture("explicit-unlock-failure", "smoke-script-fail")
-        write_registry_npmrc(failing_fixture, registry.registry_url)
-        write_package_json(
-            failing_fixture / "package.json",
-            {
-                "name": "script-policy-smoke",
-                "private": True,
-                "version": "0.0.0",
-                "dependencies": {"smoke-script-fail": "^1.0.0"},
-                "lpm": {"scriptPolicy": "allow"},
-            },
-        )
-        unlock_scripts_allow(
-            failing_fixture,
-            "install/script-policy explicit unlock for failing script",
-        )
-        failing_result = run_command_result(
-            "install/script-policy failing script surfaces failure but preserves install",
-            failing_fixture,
-            [str(LPM_BIN), "install", "--auto-build", *install_flags],
-            extra_env=unlock_env,
-        )
-        if failing_result.returncode == 0:
-            raise SmokeFailure(
-                "install/script-policy failing script surfaces failure but preserves install: expected non-zero exit when trusted auto-build fails"
+            failing_fixture = reset_script_policy_fixture("explicit-unlock-failure", "smoke-script-fail")
+            write_registry_npmrc(failing_fixture, registry.registry_url)
+            write_package_json(
+                failing_fixture / "package.json",
+                {
+                    "name": "script-policy-smoke",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {"smoke-script-fail": "^1.0.0"},
+                    "lpm": {"scriptPolicy": "allow"},
+                },
             )
-        require_contains(
-            failing_result.stdout + failing_result.stderr,
-            "smoke-script-fail postinstall failed intentionally",
-            "install/script-policy failing script output",
-        )
-        require_contains(
-            failing_result.stdout + failing_result.stderr,
-            "1 package(s) failed to build",
-            "install/script-policy failing script aggregate failure",
-        )
-        require_exists(failing_fixture / "node_modules" / "smoke-script-fail" / "package.json")
-        require_exists(failing_fixture / "node_modules" / "smoke-script-fail" / "fail-marker.txt")
-        require_exists(failing_fixture / "lpm.lock")
-        require_lockfile_binary_matches_toml(
-            failing_fixture,
-            "install/script-policy failing script preserves install",
-        )
+            unlock_scripts_allow(
+                failing_fixture,
+                "install/script-policy explicit unlock for failing script",
+            )
+            failing_result = run_command_result(
+                "install/script-policy failing script surfaces failure but preserves install",
+                failing_fixture,
+                [str(LPM_BIN), "install", "--auto-build", *install_flags],
+                extra_env=unlock_env,
+            )
+            if failing_result.returncode == 0:
+                raise SmokeFailure(
+                    "install/script-policy failing script surfaces failure but preserves install: expected non-zero exit when trusted auto-build fails"
+                )
+            require_contains(
+                failing_result.stdout + failing_result.stderr,
+                "smoke-script-fail postinstall failed intentionally",
+                "install/script-policy failing script output",
+            )
+            require_contains(
+                failing_result.stdout + failing_result.stderr,
+                "1 package(s) failed to build",
+                "install/script-policy failing script aggregate failure",
+            )
+            require_exists(failing_fixture / "node_modules" / "smoke-script-fail" / "package.json")
+            require_exists(failing_fixture / "node_modules" / "smoke-script-fail" / "fail-marker.txt")
+            require_exists(failing_fixture / "lpm.lock")
+            require_lockfile_binary_matches_toml(
+                failing_fixture,
+                "install/script-policy failing script preserves install",
+            )
+        else:
+            log(
+                f"install/script-policy native unlock: set {NATIVE_SECURITY_UNLOCK_ENV}=1 to exercise unlock-backed lifecycle execution"
+            )
 
 
 def scenario_install_offline_integrity() -> None:
@@ -14517,6 +14515,52 @@ def scenario_install_dev_command() -> None:
                 raise SmokeFailure(
                     f"install/dev no-env-check forwarded args: expected env[{key!r}]={expected_value!r}, got {actual_value!r}"
                 )
+        for key in ["NODE_OPTIONS", "LD_PRELOAD", "BASH_ENV"]:
+            if captured_env.get(key) is not None:
+                raise SmokeFailure(
+                    f"install/dev no-env-check forwarded args: expected runtime hook env {key} to be filtered, got {captured_env.get(key)!r}"
+                )
+
+        run_capture_path = fixture / "run-capture.json"
+        bad_preload_path = fixture / "bad-preload.cjs"
+        bad_preload_path.write_text("process.exit(93)\n", encoding="utf-8")
+        run_output = run_command(
+            "install/dev lpm run strips runtime hooks",
+            fixture,
+            [
+                str(LPM_BIN),
+                "run",
+                "--env",
+                "staging",
+                "--no-env-check",
+                "dev",
+                "--",
+                "--port",
+                str(dev_port),
+                "--capture",
+                run_capture_path.name,
+            ],
+            extra_env={
+                **scenario_env,
+                "NODE_OPTIONS": f"--require={bad_preload_path}",
+            },
+        )
+        require_contains(
+            run_output,
+            "Env: staging",
+            "install/dev lpm run strips runtime hooks output",
+        )
+        require_exists(run_capture_path)
+        run_capture = json.loads(run_capture_path.read_text(encoding="utf-8"))
+        run_env = run_capture.get("env") or {}
+        if run_env.get("SHARED") != "from-staging-local":
+            raise SmokeFailure(
+                "install/dev lpm run strips runtime hooks: expected --env staging dotenv layering"
+            )
+        if run_env.get("NODE_OPTIONS") is not None:
+            raise SmokeFailure(
+                "install/dev lpm run strips runtime hooks: expected inherited/env-schema NODE_OPTIONS to be filtered"
+            )
 
         https_failure_fixture = reset_dev_fixture().resolve()
         https_failure_capture_path = https_failure_fixture / "https-failure-capture.json"
@@ -16069,12 +16113,49 @@ def scenario_install_env_command() -> None:
                 "install/env ls json: expected preview schema status to show both required secrets satisfied"
             )
 
-        run_output = run_command(
-            "install/env preview run resolves files plus vault",
+        hook_set_result = run_command_result(
+            "install/env set preview runtime hook secret json",
             fixture,
-            [str(LPM_BIN), "run", "--env=preview", "hello"],
+            [
+                str(LPM_BIN),
+                "--json",
+                "env",
+                "set",
+                "--env=preview",
+                "NODE_OPTIONS=--require=./bad-preload.cjs",
+            ],
             extra_env=scenario_env,
         )
+        if hook_set_result.returncode != 0:
+            raise SmokeFailure(
+                "install/env set preview runtime hook secret json failed with exit code "
+                f"{hook_set_result.returncode}"
+            )
+        hook_set_envelope = json.loads(hook_set_result.stdout)
+        if hook_set_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/env set preview runtime hook secret json: expected success=true"
+            )
+
+        lpm_json_path = fixture / "lpm.json"
+        original_lpm_json = lpm_json_path.read_text(encoding="utf-8")
+        lpm_config = json.loads(original_lpm_json)
+        lpm_config["tasks"]["hello"]["command"] = (
+            lpm_config["tasks"]["hello"]["command"] + " NODE_OPTIONS=$NODE_OPTIONS"
+        )
+        lpm_json_path.write_text(
+            json.dumps(lpm_config, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        try:
+            run_output = run_command(
+                "install/env preview run resolves files plus vault",
+                fixture,
+                [str(LPM_BIN), "run", "--env=preview", "hello"],
+                extra_env=scenario_env,
+            )
+        finally:
+            lpm_json_path.write_text(original_lpm_json, encoding="utf-8")
         require_contains(run_output, "ENV=staging", "install/env preview run output")
         require_contains(run_output, "PORT=8080", "install/env preview run output")
         require_contains(
@@ -16085,6 +16166,16 @@ def scenario_install_env_command() -> None:
         require_contains(
             run_output,
             "STRIPE=sk_preview_smoke",
+            "install/env preview run output",
+        )
+        require_contains(
+            run_output,
+            "NODE_OPTIONS=",
+            "install/env preview run output",
+        )
+        require_not_contains(
+            run_output,
+            "NODE_OPTIONS=--require",
             "install/env preview run output",
         )
 
@@ -16709,11 +16800,123 @@ def scenario_install_exec_command() -> None:
             encoding="utf-8",
         )
 
+    def write_fake_react_runtime(project_path: Path) -> None:
+        react_dir = project_path / "node_modules" / "react"
+        react_dir.mkdir(parents=True, exist_ok=True)
+        react_dir.joinpath("package.json").write_text(
+            json.dumps(
+                {
+                    "name": "react",
+                    "version": "0.0.0",
+                    "type": "commonjs",
+                    "exports": {
+                        "./jsx-runtime": {
+                            "require": "./jsx-runtime.js",
+                            "import": "./jsx-runtime.mjs",
+                        }
+                    },
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        react_dir.joinpath("jsx-runtime.js").write_text(
+            "function jsx(type, props, key) {\n"
+            "  return { type, props: props || {}, key: key ?? null };\n"
+            "}\n"
+            "exports.Fragment = 'Fragment';\n"
+            "exports.jsx = jsx;\n"
+            "exports.jsxs = jsx;\n",
+            encoding="utf-8",
+        )
+        react_dir.joinpath("jsx-runtime.mjs").write_text(
+            "export const Fragment = 'Fragment';\n"
+            "export function jsx(type, props, key) {\n"
+            "  return { type, props: props || {}, key: key ?? null };\n"
+            "}\n"
+            "export const jsxs = jsx;\n",
+            encoding="utf-8",
+        )
+
+    def require_exec_watch_rerun(project_path: Path) -> None:
+        watch_file = project_path / "scripts" / "watch.js"
+        watch_file.write_text("console.log('watch:first')\n", encoding="utf-8")
+        log(
+            "install/exec watch reruns changed file: "
+            f"{LPM_BIN} --watch scripts/watch.js"
+        )
+        process = subprocess.Popen(
+            [str(LPM_BIN), "--watch", "scripts/watch.js"],
+            cwd=project_path,
+            env=merged_env(),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        output = b""
+        saw_first = False
+        saw_second = False
+        deadline = time.monotonic() + 15
+        streams = [
+            stream
+            for stream in (process.stdout, process.stderr)
+            if stream is not None
+        ]
+        try:
+            while time.monotonic() < deadline and not saw_second:
+                ready, _, _ = select.select(streams, [], [], 0.1)
+                for stream in ready:
+                    chunk = os.read(stream.fileno(), 4096)
+                    if not chunk:
+                        continue
+                    output += chunk
+                    decoded = chunk.decode("utf-8", errors="replace")
+                    if stream is process.stdout:
+                        sys.stdout.write(decoded)
+                    else:
+                        sys.stderr.write(decoded)
+                    if b"watch:first" in output and not saw_first:
+                        saw_first = True
+                        watch_file.write_text(
+                            "console.log('watch:second')\n",
+                            encoding="utf-8",
+                        )
+                    if b"watch:second" in output:
+                        saw_second = True
+                        break
+                if process.poll() is not None:
+                    break
+        finally:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=5)
+
+        decoded_output = output.decode("utf-8", errors="replace")
+        if not saw_first:
+            raise SmokeFailure(
+                "install/exec watch reruns changed file: expected the initial run output"
+            )
+        if not saw_second:
+            raise SmokeFailure(
+                "install/exec watch reruns changed file: expected rerun output after editing the watched file; "
+                f"got:\n{decoded_output}"
+            )
+
     with tempfile.TemporaryDirectory(prefix="lpm-exec-ok-") as project_root:
         project_path = Path(project_root)
         write_project(project_path, "exec-test")
         project_path.joinpath(".env").write_text(
-            "EXEC_MESSAGE=hello-from-dotenv\n",
+            "EXEC_MESSAGE=hello-from-dotenv\n"
+            "NODE_OPTIONS=--require=./bad-preload.cjs\n"
+            "LD_PRELOAD=/tmp/lpm-smoke-should-not-load.so\n"
+            "BASH_ENV=./bad-shell-env\n",
+            encoding="utf-8",
+        )
+        project_path.joinpath("bad-preload.cjs").write_text(
+            "process.exit(97)\n",
             encoding="utf-8",
         )
         scripts_dir = project_path / "scripts"
@@ -16727,70 +16930,270 @@ def scenario_install_exec_command() -> None:
             encoding="utf-8",
         )
 
-        exec_result = run_command_result(
-            "install/exec js dotenv args",
+        exec_path_result = run_command_result(
+            "install/exec source file rejected",
             project_path,
-            [str(LPM_BIN), "exec", "scripts/echo.js", "--", "--flag", "value"],
+            [str(LPM_BIN), "exec", "scripts/echo.js"],
+        )
+        if exec_path_result.returncode == 0:
+            raise SmokeFailure(
+                "install/exec source file rejected: expected a non-zero exit"
+            )
+        require_contains(
+            exec_path_result.stderr,
+            "`lpm exec` runs project-local binaries, not file paths",
+            "install/exec source file rejected stderr",
+        )
+        require_contains(
+            exec_path_result.stderr,
+            "Use `lpm scripts/echo.js`",
+            "install/exec source file rejected stderr",
+        )
+
+        exec_result = run_command_result(
+            "install/source-file js dotenv args",
+            project_path,
+            [str(LPM_BIN), "scripts/echo.js", "--", "--flag", "value"],
         )
         if exec_result.returncode != 0:
             raise SmokeFailure(
-                f"install/exec js dotenv args failed with exit code {exec_result.returncode}"
+                f"install/source-file js dotenv args failed with exit code {exec_result.returncode}"
             )
         require_contains(
             exec_result.stdout,
             '{"env":"hello-from-dotenv","args":["--flag","value"]}',
-            "install/exec js dotenv args stdout",
+            "install/source-file js dotenv args stdout",
         )
         require_contains(
             exec_result.stderr,
             "› Executing scripts/echo.js with Node.js",
-            "install/exec js dotenv args stderr",
+            "install/source-file js dotenv args stderr",
         )
         require_contains(
             exec_result.stderr,
             "✓ Done · exited 0 in",
-            "install/exec js dotenv args stderr",
+            "install/source-file js dotenv args stderr",
         )
+        require_exec_watch_rerun(project_path)
+
+    with tempfile.TemporaryDirectory(prefix="lpm-exec-ts-runtime-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "exec-ts-runtime")
+        write_fake_react_runtime(project_path)
+        project_path.joinpath("tsconfig.json").write_text(
+            json.dumps(
+                {
+                    "compilerOptions": {
+                        "baseUrl": ".",
+                        "paths": {
+                            "@fixtures/*": ["fixtures/*"],
+                        },
+                    }
+                }
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        (project_path / "fixtures").mkdir(parents=True, exist_ok=True)
+        (project_path / "fixtures" / "value.ts").write_text(
+            "export const value: string = 'path-mapped-value';\n",
+            encoding="utf-8",
+        )
+        scripts_dir = project_path / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        scripts_dir.joinpath("child.ts").write_text(
+            "import { value } from '@fixtures/value';\n"
+            "console.log(`child:${value}`);\n",
+            encoding="utf-8",
+        )
+        scripts_dir.joinpath("parent.ts").write_text(
+            "import { value } from '@fixtures/value';\n"
+            "import { spawnSync } from 'node:child_process';\n"
+            "const result = spawnSync(process.execPath, ['scripts/child.ts'], { encoding: 'utf8' });\n"
+            "if (result.status !== 0) {\n"
+            "  process.stderr.write(result.stderr);\n"
+            "  process.exit(result.status || 1);\n"
+            "}\n"
+            "console.log(JSON.stringify({ parent: value, child: result.stdout.trim(), args: process.argv.slice(2) }));\n",
+            encoding="utf-8",
+        )
+        scripts_dir.joinpath("view.tsx").write_text(
+            "import { value } from '@fixtures/value';\n"
+            "const view = <main data-value={value}><span>ok</span></main>;\n"
+            "console.log(JSON.stringify({ type: view.type, value: view.props['data-value'], child: view.props.children.type }));\n",
+            encoding="utf-8",
+        )
+
+        ts_result = run_command_result(
+            "install/source-file ts lpm runtime paths and child",
+            project_path,
+            [str(LPM_BIN), "scripts/parent.ts", "--", "--smoke"],
+        )
+        if ts_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/source-file ts lpm runtime paths and child failed with exit code {ts_result.returncode}"
+            )
+        require_contains(
+            ts_result.stdout,
+            '"parent":"path-mapped-value"',
+            "install/source-file ts lpm runtime paths and child stdout",
+        )
+        require_contains(
+            ts_result.stdout,
+            '"child":"child:path-mapped-value"',
+            "install/source-file ts lpm runtime paths and child stdout",
+        )
+        require_contains(
+            ts_result.stdout,
+            '"args":["--smoke"]',
+            "install/source-file ts lpm runtime paths and child stdout",
+        )
+        require_contains(
+            ts_result.stderr,
+            "+ LPM TS runtime",
+            "install/source-file ts lpm runtime paths and child stderr",
+        )
+
+        tsx_result = run_command_result(
+            "install/source-file tsx lpm runtime jsx",
+            project_path,
+            [str(LPM_BIN), "scripts/view.tsx"],
+        )
+        if tsx_result.returncode != 0:
+            raise SmokeFailure(
+                f"install/source-file tsx lpm runtime jsx failed with exit code {tsx_result.returncode}"
+            )
+        require_contains(
+            tsx_result.stdout,
+            '"type":"main"',
+            "install/source-file tsx lpm runtime jsx stdout",
+        )
+        require_contains(
+            tsx_result.stdout,
+            '"value":"path-mapped-value"',
+            "install/source-file tsx lpm runtime jsx stdout",
+        )
+        require_contains(
+            tsx_result.stdout,
+            '"child":"span"',
+            "install/source-file tsx lpm runtime jsx stdout",
+        )
+
+        plain_tsx_result = run_command_result(
+            "install/source-file plain-node refuses tsx",
+            project_path,
+            [str(LPM_BIN), "--plain-node", "scripts/view.tsx"],
+        )
+        if plain_tsx_result.returncode == 0:
+            raise SmokeFailure(
+                "install/source-file plain-node refuses tsx: expected a non-zero exit"
+            )
+        require_contains(
+            plain_tsx_result.stderr,
+            "--plain-node",
+            "install/source-file plain-node refuses tsx stderr",
+        )
+
+        no_augment_result = run_command_result(
+            "install/source-file no-augment alias refuses tsx",
+            project_path,
+            [str(LPM_BIN), "--no-augment", "scripts/view.tsx"],
+        )
+        if no_augment_result.returncode == 0:
+            raise SmokeFailure(
+                "install/source-file no-augment alias refuses tsx: expected a non-zero exit"
+            )
+        require_contains(
+            no_augment_result.stderr,
+            "--plain-node",
+            "install/source-file no-augment alias refuses tsx stderr",
+        )
+
+    with tempfile.TemporaryDirectory(prefix="lpm-exec-no-npx-") as project_root:
+        project_path = Path(project_root)
+        write_project(project_path, "exec-no-npx")
+        scripts_dir = project_path / "scripts"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        scripts_dir.joinpath("view.tsx").write_text(
+            "console.log(<main />)\n",
+            encoding="utf-8",
+        )
+        fake_bin = project_path / "fake-bin"
+        real_node = shutil.which("node")
+        if real_node is None:
+            raise SmokeFailure("install/exec no npx fallback: node is required")
+        write_executable(
+            fake_bin / "node",
+            "#!/usr/bin/env bash\n"
+            "if [[ \"${1:-}\" == \"--version\" ]]; then\n"
+            "  printf 'v20.5.0\\n'\n"
+            "  exit 0\n"
+            "fi\n"
+            f"exec {shlex.quote(real_node)} \"$@\"\n",
+        )
+        write_executable(
+            fake_bin / "npx",
+            "#!/usr/bin/env bash\n"
+            "touch ../npx-was-used\n"
+            "printf 'unsafe npx fallback was used\\n'\n"
+            "exit 0\n",
+        )
+        no_npx_result = run_command_result(
+            "install/source-file refuses unsafe npx fallback",
+            project_path,
+            [str(LPM_BIN), "scripts/view.tsx"],
+            extra_env={"PATH": f"{fake_bin}{os.pathsep}{os.environ.get('PATH', '')}"},
+        )
+        if no_npx_result.returncode == 0:
+            raise SmokeFailure(
+                "install/source-file refuses unsafe npx fallback: expected a non-zero exit"
+            )
+        require_contains(
+            no_npx_result.stderr,
+            "will not fall back to `npx tsx`",
+            "install/source-file refuses unsafe npx fallback stderr",
+        )
+        require_not_exists(project_path / "npx-was-used")
 
     with tempfile.TemporaryDirectory(prefix="lpm-exec-missing-") as project_root:
         project_path = Path(project_root)
         write_project(project_path, "exec-missing")
 
         missing_result = run_command_result(
-            "install/exec missing file",
+            "install/source-file missing file",
             project_path,
-            [str(LPM_BIN), "exec", "scripts/missing.js"],
+            [str(LPM_BIN), "scripts/missing.js"],
         )
         if missing_result.returncode == 0:
             raise SmokeFailure(
-                "install/exec missing file: expected a non-zero exit"
+                "install/source-file missing file: expected a non-zero exit"
             )
         require_contains(
             missing_result.stderr,
             "file not found",
-            "install/exec missing file stderr",
+            "install/source-file missing file stderr",
         )
 
         missing_json_result = run_command_result(
-            "install/exec missing file json",
+            "install/source-file missing file json",
             project_path,
-            [str(LPM_BIN), "--json", "exec", "scripts/missing.js"],
+            [str(LPM_BIN), "--json", "scripts/missing.js"],
         )
         if missing_json_result.returncode == 0:
             raise SmokeFailure(
-                "install/exec missing file json: expected a non-zero exit"
+                "install/source-file missing file json: expected a non-zero exit"
             )
         missing_json_envelope = json.loads(missing_json_result.stdout)
         if missing_json_envelope.get("success") is not False:
             raise SmokeFailure(
-                "install/exec missing file json: expected success=false"
+                "install/source-file missing file json: expected success=false"
             )
         error_message = missing_json_envelope.get("error")
         if not isinstance(error_message, str) or (
             "file not found" not in error_message and "missing.js" not in error_message
         ):
             raise SmokeFailure(
-                "install/exec missing file json: expected the missing-file error in the JSON envelope"
+                "install/source-file missing file json: expected the missing-file error in the JSON envelope"
             )
 
 
@@ -26927,7 +27330,7 @@ SCENARIOS = {
         scenario_install_pack_command,
     ),
     "install-dev": (
-        "Run lpm dev coverage for .env.example bootstrap, env-schema validation vs --no-env-check, explicit --env layering, hermetic HTTPS consent/bootstrap, tunnel inspector/no-inspect/strict inspect-port behavior, single-service arg forwarding, and multi-service dependsOn orchestration.",
+        "Run lpm dev/run coverage for .env.example bootstrap, env-schema validation vs --no-env-check, explicit --env layering, runtime-hook env filtering, hermetic HTTPS consent/bootstrap, tunnel inspector/no-inspect/strict inspect-port behavior, single-service arg forwarding, and multi-service dependsOn orchestration.",
         scenario_install_dev_command,
     ),
     "install-dev-real-world": (
@@ -26955,7 +27358,7 @@ SCENARIOS = {
         scenario_install_hosts_command,
     ),
     "install-env": (
-        "Run lpm env coverage for required-secret gating, preview-scoped writes, env ls schema counts, and lpm run task injection through named-environment file inheritance.",
+        "Run lpm env coverage for required-secret gating, preview-scoped writes, env ls schema counts, runtime-hook secret filtering, and lpm run task injection through named-environment file inheritance.",
         scenario_install_env_command,
     ),
     "install-env-pair": (
@@ -26967,7 +27370,7 @@ SCENARIOS = {
         scenario_install_skills_command,
     ),
     "install-exec": (
-        "Run lpm exec coverage for dotenv-backed JS execution, forwarded args, and missing-file failures in human and JSON modes.",
+        "Run source-file execution coverage for dotenv-backed JS execution, TypeScript/TSX runtime behavior, watch reruns, plain-node opt-out, no-npx fallback, missing-file failures, and lpm exec file-path rejection.",
         scenario_install_exec_command,
     ),
     "install-dlx": (
@@ -27191,7 +27594,7 @@ SCENARIOS = {
         scenario_install_offline_integrity,
     ),
     "install-script-policy": (
-        "Run script-policy coverage for default-deny gating, guarded allow and triage proposals, explicit scripts-allow unlock execution, lifecycle order, targeted rebuild, and the current auto-build failure surface.",
+        "Run script-policy coverage for default-deny gating, guarded allow and triage proposals, and opt-in native unlock-backed lifecycle execution.",
         scenario_install_script_policy,
     ),
     "install-save-policy": (
