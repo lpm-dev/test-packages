@@ -27686,7 +27686,1357 @@ def scenario_install_registry_faults_command() -> None:
             )
 
 
+def scenario_install_prod_omit() -> None:
+    registry_packages = [
+        {
+            "name": "smoke-prod-consumer",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {"smoke-prod-transitive": "1.0.0"},
+                        "peerDependencies": {"smoke-prod-peer": "1.0.0"},
+                    },
+                    "package_json_extra": {
+                        "main": "index.js",
+                        "dependencies": {"smoke-prod-transitive": "1.0.0"},
+                        "peerDependencies": {"smoke-prod-peer": "1.0.0"},
+                    },
+                    "files": {
+                        "index.js": (
+                            "module.exports = require('smoke-prod-transitive') + ':' + "
+                            "require('smoke-prod-peer')\n"
+                        ),
+                    },
+                }
+            },
+        },
+        {
+            "name": "smoke-prod-transitive",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"main": "index.js"},
+                    "files": {"index.js": "module.exports = 'transitive'\n"},
+                }
+            },
+        },
+        {
+            "name": "smoke-prod-peer",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"main": "index.js"},
+                    "files": {"index.js": "module.exports = 'peer'\n"},
+                }
+            },
+        },
+        {
+            "name": "smoke-dev-only",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                }
+            },
+        },
+        {
+            "name": "smoke-optional-only",
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                }
+            },
+        },
+    ]
+    install_flags = ["--no-skills", "--no-editor-setup", "--no-security-summary"]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-prod-omit-home-"
+    ) as home_root, tempfile.TemporaryDirectory(prefix="lpm-prod-omit-project-") as project_dir:
+        project = Path(project_dir)
+        write_package_json(
+            project / "package.json",
+            {
+                "name": "prod-omit-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {"smoke-prod-consumer": "1.0.0"},
+                "devDependencies": {"smoke-dev-only": "1.0.0"},
+                "optionalDependencies": {"smoke-optional-only": "1.0.0"},
+            },
+        )
+        write_registry_npmrc(project, registry.registry_url)
+        scenario_env = smoke_home_env(home_root)
+
+        def require_production_layout(*, optional_present: bool, context: str) -> None:
+            require_exists(project / "node_modules" / "smoke-prod-consumer" / "package.json")
+            require_exists(project / "node_modules" / "smoke-prod-peer" / "package.json")
+            require_not_exists(project / "node_modules" / "smoke-dev-only")
+            optional_path = project / "node_modules" / "smoke-optional-only"
+            if optional_present:
+                require_exists(optional_path / "package.json")
+            else:
+                require_not_exists(optional_path)
+            runtime = run_command(
+                f"{context} runtime",
+                project,
+                ["node", "-e", "process.stdout.write(require('smoke-prod-consumer'))"],
+                extra_env=scenario_env,
+            )
+            if runtime != "transitive:peer":
+                raise SmokeFailure(
+                    f"{context}: expected retained production dependency and peer to resolve, got {runtime!r}"
+                )
+
+        run_command(
+            "install/prod-omit cold production install",
+            project,
+            [str(LPM_BIN), "install", "--prod", *install_flags],
+            extra_env=scenario_env,
+        )
+        require_production_layout(
+            optional_present=True,
+            context="install/prod-omit cold production install",
+        )
+        lockfile_path = project / "lpm.lock"
+        lockfile_bytes = lockfile_path.read_bytes()
+        lockfile_text = lockfile_bytes.decode("utf-8")
+        for package_name in {
+            "smoke-prod-consumer",
+            "smoke-prod-transitive",
+            "smoke-prod-peer",
+            "smoke-dev-only",
+            "smoke-optional-only",
+        }:
+            require_contains(
+                lockfile_text,
+                f'name = "{package_name}"',
+                "install/prod-omit complete lockfile",
+            )
+
+        run_command(
+            "install/prod-omit warm production install",
+            project,
+            [str(LPM_BIN), "install", "--prod", *install_flags],
+            extra_env=scenario_env,
+        )
+        require_production_layout(
+            optional_present=True,
+            context="install/prod-omit warm production install",
+        )
+        if lockfile_path.read_bytes() != lockfile_bytes:
+            raise SmokeFailure(
+                "install/prod-omit warm production install: expected the complete lockfile to stay byte-identical"
+            )
+
+        delete_path(project / "node_modules")
+        run_command(
+            "install/prod-omit offline frozen dev and optional omission",
+            project,
+            [
+                str(LPM_BIN),
+                "install",
+                "--offline",
+                "--frozen-lockfile",
+                "--omit=dev,optional",
+                *install_flags,
+            ],
+            extra_env=scenario_env,
+        )
+        require_production_layout(
+            optional_present=False,
+            context="install/prod-omit offline frozen dev and optional omission",
+        )
+        if lockfile_path.read_bytes() != lockfile_bytes:
+            raise SmokeFailure(
+                "install/prod-omit offline frozen omission: expected the complete lockfile to stay byte-identical"
+            )
+
+
+def scenario_install_root_lifecycle() -> None:
+    registry_packages = [
+        {
+            "name": package_name,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                }
+            },
+        }
+        for package_name in ["smoke-root-dependency", "smoke-root-added"]
+    ]
+    install_flags = ["--no-skills", "--no-editor-setup", "--no-security-summary"]
+    ordered_phases = [
+        "pnpm:devPreinstall",
+        "preinstall",
+        "install",
+        "postinstall",
+        "preprepare",
+        "prepare",
+        "postprepare",
+    ]
+
+    def write_root_lifecycle_script(project: Path) -> None:
+        project.joinpath("lifecycle.js").write_text(
+            "const fs = require('node:fs')\n"
+            "const path = require('node:path')\n"
+            "const requested = process.argv[2]\n"
+            "const dependency = path.join(process.cwd(), 'node_modules', 'smoke-root-dependency', 'package.json')\n"
+            "const state = fs.existsSync(dependency) ? 'present' : 'missing'\n"
+            "fs.appendFileSync(path.join(process.cwd(), 'root-lifecycle.log'), "
+            "`${requested}:${process.env.npm_lifecycle_event}:${state}\\n`)\n"
+            "if (requested === 'preinstall-fail') process.exit(17)\n",
+            encoding="utf-8",
+        )
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-root-lifecycle-home-"
+    ) as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-root-lifecycle-project-"
+    ) as project_dir, tempfile.TemporaryDirectory(
+        prefix="lpm-root-lifecycle-failure-"
+    ) as failure_dir, tempfile.TemporaryDirectory(
+        prefix="lpm-root-lifecycle-workspace-"
+    ) as workspace_dir:
+        scenario_env = smoke_home_env(home_root)
+        project = Path(project_dir)
+        write_package_json(
+            project / "package.json",
+            {
+                "name": "root-lifecycle-smoke",
+                "private": True,
+                "version": "1.2.3",
+                "dependencies": {"smoke-root-dependency": "1.0.0"},
+                "scripts": {phase: f"node lifecycle.js {phase}" for phase in ordered_phases},
+            },
+        )
+        write_root_lifecycle_script(project)
+        write_registry_npmrc(project, registry.registry_url)
+
+        run_command(
+            "install/root-lifecycle ordered bare install",
+            project,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        lifecycle_lines = project.joinpath("root-lifecycle.log").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        expected_lines = [
+            f"{phase}:{phase}:{'missing' if index == 0 else 'present'}"
+            for index, phase in enumerate(ordered_phases)
+        ]
+        if lifecycle_lines != expected_lines:
+            raise SmokeFailure(
+                "install/root-lifecycle ordered bare install: expected the documented lifecycle order "
+                f"and dependency boundary, got {lifecycle_lines!r}"
+            )
+
+        project.joinpath("root-lifecycle.log").unlink()
+        run_command(
+            "install/root-lifecycle explicit package add",
+            project,
+            [str(LPM_BIN), "install", "smoke-root-added@1.0.0", *install_flags],
+            extra_env=scenario_env,
+        )
+        require_not_exists(project / "root-lifecycle.log")
+        require_exists(project / "node_modules" / "smoke-root-added" / "package.json")
+
+        failure_project = Path(failure_dir)
+        write_package_json(
+            failure_project / "package.json",
+            {
+                "name": "root-lifecycle-failure-smoke",
+                "private": True,
+                "version": "1.0.0",
+                "dependencies": {"smoke-root-dependency": "1.0.0"},
+                "scripts": {
+                    "preinstall": "node lifecycle.js preinstall-fail",
+                    "postinstall": "node lifecycle.js postinstall",
+                },
+            },
+        )
+        write_root_lifecycle_script(failure_project)
+        write_registry_npmrc(failure_project, registry.registry_url)
+        failure_result = run_command_result(
+            "install/root-lifecycle failing phase short-circuits",
+            failure_project,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=scenario_env,
+        )
+        if failure_result.returncode == 0:
+            raise SmokeFailure(
+                "install/root-lifecycle failing phase short-circuits: expected a non-zero exit"
+            )
+        failure_lines = failure_project.joinpath("root-lifecycle.log").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if failure_lines != ["preinstall-fail:preinstall:present"]:
+            raise SmokeFailure(
+                "install/root-lifecycle failing phase short-circuits: expected later phases not to run, "
+                f"got {failure_lines!r}"
+            )
+        require_exists(
+            failure_project / "node_modules" / "smoke-root-dependency" / "package.json"
+        )
+
+        workspace = Path(workspace_dir)
+        write_registry_npmrc(workspace, registry.registry_url)
+        write_package_json(
+            workspace / "package.json",
+            {
+                "name": "root-lifecycle-workspace",
+                "private": True,
+                "version": "1.0.0",
+                "workspaces": ["packages/*"],
+                "dependencies": {"smoke-workspace-b": "workspace:*"},
+                "scripts": {"postinstall": "node lifecycle.js workspace-root"},
+            },
+        )
+        write_package_json(
+            workspace / "packages" / "a" / "package.json",
+            {
+                "name": "smoke-workspace-a",
+                "version": "1.0.0",
+                "scripts": {"postinstall": "node lifecycle.js workspace-a ../../workspace-lifecycle.log"},
+            },
+        )
+        write_package_json(
+            workspace / "packages" / "b" / "package.json",
+            {
+                "name": "smoke-workspace-b",
+                "version": "1.0.0",
+                "dependencies": {"smoke-workspace-a": "workspace:*"},
+                "scripts": {"postinstall": "node lifecycle.js workspace-b ../../workspace-lifecycle.log"},
+            },
+        )
+        member_script = (
+            "const fs = require('node:fs')\n"
+            "const path = require('node:path')\n"
+            "fs.appendFileSync(path.resolve(process.cwd(), process.argv[3]), `${process.argv[2]}\\n`)\n"
+        )
+        for member in [workspace / "packages" / "a", workspace / "packages" / "b"]:
+            member.joinpath("lifecycle.js").write_text(member_script, encoding="utf-8")
+        workspace.joinpath("lifecycle.js").write_text(
+            "require('node:fs').appendFileSync('workspace-lifecycle.log', 'workspace-root\\n')\n",
+            encoding="utf-8",
+        )
+
+        run_command(
+            "install/root-lifecycle recursive workspace order",
+            workspace,
+            [str(LPM_BIN), "install", "--recursive", *install_flags],
+            extra_env=scenario_env,
+        )
+        workspace_lines = workspace.joinpath("workspace-lifecycle.log").read_text(
+            encoding="utf-8"
+        ).splitlines()
+        if workspace_lines != ["workspace-a", "workspace-b", "workspace-root"]:
+            raise SmokeFailure(
+                "install/root-lifecycle recursive workspace order: expected dependency-first members "
+                f"and root-last execution, got {workspace_lines!r}"
+            )
+
+
+def scenario_install_registry_auth_isolation() -> None:
+    install_flags = ["--no-skills", "--no-editor-setup", "--no-security-summary"]
+
+    def registry_package(name: str) -> dict[str, object]:
+        return {
+            "name": name,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                }
+            },
+        }
+
+    def auth_key(registry_url: str) -> str:
+        parsed = urlparse(registry_url)
+        return f"//{parsed.netloc}/:_authToken"
+
+    def write_npmrc(path: Path, lines: list[str], mode: int = 0o600) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if os.name != "nt":
+            path.chmod(mode)
+
+    def package_requests(
+        registry: MockRegistry,
+        package_name: str,
+    ) -> list[dict[str, object]]:
+        metadata_path = f"/{package_name}"
+        tarball_prefix = f"/tarballs/{package_name}/-/{package_name}-"
+        return [
+            row
+            for row in registry.request_details(method="GET")
+            if row.get("path") == metadata_path
+            or str(row.get("path", "")).startswith(tarball_prefix)
+        ]
+
+    def require_package_auth(
+        registry: MockRegistry,
+        package_name: str,
+        expected_token: str | None,
+        context: str,
+    ) -> None:
+        rows = package_requests(registry, package_name)
+        paths = {str(row.get("path", "")) for row in rows}
+        if f"/{package_name}" not in paths or not any(
+            path.startswith(f"/tarballs/{package_name}/") for path in paths
+        ):
+            raise SmokeFailure(
+                f"{context}: expected authenticated metadata and tarball requests, got {sorted(paths)!r}"
+            )
+        expected_header = None if expected_token is None else f"Bearer {expected_token}"
+        for row in rows:
+            headers = row.get("headers", {})
+            authorization = headers.get("authorization") if isinstance(headers, dict) else None
+            if authorization != expected_header:
+                raise SmokeFailure(
+                    f"{context}: request {row.get('path')!r} did not use the expected "
+                    "origin-scoped authorization posture"
+                )
+
+    alpha_name = "@smoke-alpha/private"
+    beta_name = "@smoke-beta/private"
+    with MockRegistry([registry_package(alpha_name)]) as alpha_registry, MockRegistry(
+        [registry_package(beta_name)]
+    ) as beta_registry, tempfile.TemporaryDirectory(
+        prefix="lpm-registry-auth-home-"
+    ) as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-registry-auth-project-"
+    ) as project_dir:
+        project = Path(project_dir)
+        write_package_json(
+            project / "package.json",
+            {
+                "name": "registry-auth-isolation-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {alpha_name: "1.0.0", beta_name: "1.0.0"},
+            },
+        )
+        write_npmrc(
+            Path(home_root) / ".npmrc",
+            [
+                f"@smoke-alpha:registry={alpha_registry.registry_url}",
+                f"@smoke-beta:registry={beta_registry.registry_url}",
+                f"{auth_key(alpha_registry.registry_url)}=${{ALPHA_REGISTRY_TOKEN}}",
+                f"{auth_key(beta_registry.registry_url)}=home-beta-token",
+            ],
+        )
+        write_npmrc(
+            project / ".npmrc",
+            [f"{auth_key(beta_registry.registry_url)}=project-beta-token"],
+        )
+        auth_env = smoke_home_env(home_root, ALPHA_REGISTRY_TOKEN="alpha-env-token")
+        auth_result = run_command_result(
+            "install/registry-auth scoped origin isolation",
+            project,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=auth_env,
+        )
+        if auth_result.returncode != 0:
+            raise SmokeFailure(
+                "install/registry-auth scoped origin isolation failed with exit code "
+                f"{auth_result.returncode}"
+            )
+        require_package_auth(
+            alpha_registry,
+            alpha_name,
+            "alpha-env-token",
+            "install/registry-auth home env interpolation",
+        )
+        require_package_auth(
+            beta_registry,
+            beta_name,
+            "project-beta-token",
+            "install/registry-auth project literal override",
+        )
+        for registry, forbidden_token, context in [
+            (alpha_registry, "project-beta-token", "alpha registry"),
+            (beta_registry, "alpha-env-token", "beta registry"),
+        ]:
+            leaked_header = f"Bearer {forbidden_token}"
+            if any(
+                isinstance(row.get("headers"), dict)
+                and row["headers"].get("authorization") == leaked_header
+                for row in registry.request_details()
+            ):
+                raise SmokeFailure(
+                    f"install/registry-auth scoped origin isolation: {context} received a cross-origin token"
+                )
+        combined_output = auth_result.stdout + auth_result.stderr
+        for token in ["alpha-env-token", "home-beta-token", "project-beta-token"]:
+            require_not_contains(
+                combined_output,
+                token,
+                "install/registry-auth output secret redaction",
+            )
+
+    project_env_name = "@smoke-project-env/private"
+    with MockRegistry([registry_package(project_env_name)]) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-registry-project-env-home-"
+    ) as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-registry-project-env-project-"
+    ) as project_dir:
+        project = Path(project_dir)
+        write_package_json(
+            project / "package.json",
+            {
+                "name": "registry-project-env-refusal-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {project_env_name: "1.0.0"},
+            },
+        )
+        write_npmrc(
+            project / ".npmrc",
+            [
+                f"@smoke-project-env:registry={registry.registry_url}",
+                f"{auth_key(registry.registry_url)}=${{PROJECT_REGISTRY_TOKEN}}",
+            ],
+        )
+        result = run_command_result(
+            "install/registry-auth project env credential refusal",
+            project,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=smoke_home_env(
+                home_root,
+                PROJECT_REGISTRY_TOKEN="must-not-cross-project-boundary",
+            ),
+        )
+        if result.returncode != 0:
+            raise SmokeFailure(
+                "install/registry-auth project env credential refusal failed with exit code "
+                f"{result.returncode}"
+            )
+        require_package_auth(
+            registry,
+            project_env_name,
+            None,
+            "install/registry-auth project env credential refusal",
+        )
+        project_env_output = result.stdout + result.stderr
+        require_contains(
+            project_env_output,
+            "env expansion in project-local .npmrc",
+            "install/registry-auth project env credential refusal warning",
+        )
+        require_contains(
+            project_env_output,
+            "refused",
+            "install/registry-auth project env credential refusal warning",
+        )
+        require_not_contains(
+            project_env_output,
+            "must-not-cross-project-boundary",
+            "install/registry-auth project env credential refusal output",
+        )
+
+    if os.name != "nt":
+        mode_640_name = "@smoke-mode-640/private"
+        with MockRegistry([registry_package(mode_640_name)]) as registry, tempfile.TemporaryDirectory(
+            prefix="lpm-registry-mode-640-home-"
+        ) as home_root, tempfile.TemporaryDirectory(
+            prefix="lpm-registry-mode-640-project-"
+        ) as project_dir:
+            project = Path(project_dir)
+            write_package_json(
+                project / "package.json",
+                {
+                    "name": "registry-mode-640-smoke",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {mode_640_name: "1.0.0"},
+                },
+            )
+            write_npmrc(
+                project / ".npmrc",
+                [
+                    f"@smoke-mode-640:registry={registry.registry_url}",
+                    f"{auth_key(registry.registry_url)}=mode-640-token",
+                ],
+                mode=0o640,
+            )
+            result = run_command_result(
+                "install/registry-auth mode 0640 keeps routing and refuses credentials",
+                project,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=smoke_home_env(home_root),
+            )
+            if result.returncode != 0:
+                raise SmokeFailure(
+                    "install/registry-auth mode 0640 failed with exit code "
+                    f"{result.returncode}"
+                )
+            require_package_auth(
+                registry,
+                mode_640_name,
+                None,
+                "install/registry-auth mode 0640",
+            )
+            mode_640_output = result.stdout + result.stderr
+            require_contains(
+                mode_640_output,
+                "mode 0640",
+                "install/registry-auth mode 0640 warning",
+            )
+            require_contains(
+                mode_640_output,
+                "refused credential fields",
+                "install/registry-auth mode 0640 warning",
+            )
+            require_not_contains(
+                mode_640_output,
+                "mode-640-token",
+                "install/registry-auth mode 0640 output",
+            )
+
+        mode_660_name = "smoke-mode-660-package"
+        package = registry_package(mode_660_name)
+        with MockRegistry([package]) as secure_registry, MockRegistry(
+            [package]
+        ) as writable_registry, tempfile.TemporaryDirectory(
+            prefix="lpm-registry-mode-660-home-"
+        ) as home_root, tempfile.TemporaryDirectory(
+            prefix="lpm-registry-mode-660-project-"
+        ) as project_dir:
+            project = Path(project_dir)
+            write_package_json(
+                project / "package.json",
+                {
+                    "name": "registry-mode-660-smoke",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {mode_660_name: "1.0.0"},
+                },
+            )
+            write_npmrc(
+                Path(home_root) / ".npmrc",
+                [
+                    f"registry={secure_registry.registry_url}",
+                    f"{auth_key(secure_registry.registry_url)}=secure-home-token",
+                ],
+            )
+            write_npmrc(
+                project / ".npmrc",
+                [
+                    f"registry={writable_registry.registry_url}",
+                    f"{auth_key(writable_registry.registry_url)}=writable-project-token",
+                ],
+                mode=0o660,
+            )
+            result = run_command_result(
+                "install/registry-auth mode 0660 refuses entire layer",
+                project,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=smoke_home_env(home_root),
+            )
+            if result.returncode != 0:
+                raise SmokeFailure(
+                    "install/registry-auth mode 0660 failed with exit code "
+                    f"{result.returncode}"
+                )
+            require_package_auth(
+                secure_registry,
+                mode_660_name,
+                "secure-home-token",
+                "install/registry-auth mode 0660 lower secure layer",
+            )
+            if writable_registry.request_details():
+                raise SmokeFailure(
+                    "install/registry-auth mode 0660: expected the group-writable project layer "
+                    "to be ignored before routing"
+                )
+            mode_660_output = result.stdout + result.stderr
+            require_contains(
+                mode_660_output,
+                "mode 0660",
+                "install/registry-auth mode 0660 warning",
+            )
+            require_contains(
+                mode_660_output,
+                "refused the entire layer",
+                "install/registry-auth mode 0660 warning",
+            )
+            for token in ["secure-home-token", "writable-project-token"]:
+                require_not_contains(
+                    mode_660_output,
+                    token,
+                    "install/registry-auth mode 0660 output secret redaction",
+                )
+
+
+def scenario_install_overrides_application() -> None:
+    shared_name = "smoke-shared-target"
+    parent_a = "smoke-override-parent-a"
+    parent_b = "smoke-override-parent-b"
+    install_flags = ["--no-skills", "--no-editor-setup", "--no-security-summary"]
+
+    def parent_package(name: str) -> dict[str, object]:
+        dependencies = {shared_name: "1.0.0"}
+        return {
+            "name": name,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": dependencies},
+                    "package_json_extra": {
+                        "main": "index.js",
+                        "dependencies": dependencies,
+                    },
+                    "files": {
+                        "index.js": (
+                            f"module.exports = require('{shared_name}/package.json').version\n"
+                        )
+                    },
+                }
+            },
+        }
+
+    shared_versions = {
+        version: {
+            "metadata_extra": {"dependencies": {}},
+            "package_json_extra": {"main": "index.js"},
+            "files": {"index.js": f"module.exports = '{version}'\n"},
+        }
+        for version in ["1.0.0", "2.0.0", "3.0.0", "4.0.0", "5.0.0", "6.0.0"]
+    }
+    registry_packages = [
+        parent_package(parent_a),
+        parent_package(parent_b),
+        {
+            "name": shared_name,
+            "dist_tags": {"latest": "6.0.0"},
+            "versions": shared_versions,
+        },
+    ]
+
+    def project_manifest(general_lpm_override: str) -> dict[str, object]:
+        return {
+            "name": "override-application-smoke",
+            "private": True,
+            "version": "0.0.0",
+            "dependencies": {parent_a: "1.0.0", parent_b: "1.0.0"},
+            "resolutions": {shared_name: "2.0.0"},
+            "overrides": {shared_name: "3.0.0"},
+            "lpm": {
+                "overrides": {
+                    shared_name: general_lpm_override,
+                    f"{parent_a}>{shared_name}": "5.0.0",
+                }
+            },
+        }
+
+    def require_runtime_graph(project: Path, env: dict[str, str | None], expected: str, context: str) -> None:
+        output = run_command(
+            f"{context} runtime",
+            project,
+            [
+                "node",
+                "-e",
+                (
+                    f"process.stdout.write(require('{parent_a}') + ':' + "
+                    f"require('{parent_b}'))"
+                ),
+            ],
+            extra_env=env,
+        )
+        if output != expected:
+            raise SmokeFailure(
+                f"{context}: expected path-specific/general override graph {expected!r}, got {output!r}"
+            )
+
+    def require_parse_failure_without_mutation(
+        project: Path,
+        env: dict[str, str | None],
+        manifest: dict[str, object],
+        expected_error: str,
+        context: str,
+    ) -> None:
+        write_package_json(project / "package.json", manifest)
+        manifest_bytes = project.joinpath("package.json").read_bytes()
+        result = run_command_result(
+            context,
+            project,
+            [str(LPM_BIN), "install", "--offline", *install_flags],
+            extra_env=env,
+        )
+        if result.returncode == 0:
+            raise SmokeFailure(f"{context}: expected a non-zero exit")
+        require_contains(
+            result.stdout + result.stderr,
+            expected_error,
+            f"{context} error",
+        )
+        if project.joinpath("package.json").read_bytes() != manifest_bytes:
+            raise SmokeFailure(f"{context}: package.json changed after parse failure")
+        for path in [
+            project / "lpm.lock",
+            project / "lpm.lockb",
+            project / "node_modules",
+            project / ".lpm" / "overrides-state.json",
+        ]:
+            require_not_exists(path)
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-overrides-home-"
+    ) as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-overrides-project-"
+    ) as project_dir, tempfile.TemporaryDirectory(
+        prefix="lpm-overrides-multi-segment-"
+    ) as multi_segment_dir, tempfile.TemporaryDirectory(
+        prefix="lpm-overrides-invalid-target-"
+    ) as invalid_target_dir, tempfile.TemporaryDirectory(
+        prefix="lpm-overrides-nested-"
+    ) as nested_dir:
+        env = smoke_home_env(home_root)
+        project = Path(project_dir)
+        write_package_json(project / "package.json", project_manifest("4.0.0"))
+        write_registry_npmrc(project, registry.registry_url)
+
+        install_result = run_command_result(
+            "install/overrides source and path precedence",
+            project,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=env,
+        )
+        if install_result.returncode != 0:
+            raise SmokeFailure(
+                "install/overrides source and path precedence failed with exit code "
+                f"{install_result.returncode}"
+            )
+        require_runtime_graph(
+            project,
+            env,
+            "5.0.0:4.0.0",
+            "install/overrides source and path precedence",
+        )
+        lockfile_path = project / "lpm.lock"
+        lockfile_bytes = lockfile_path.read_bytes()
+        lockfile_text = lockfile_bytes.decode("utf-8")
+        for version in ["4.0.0", "5.0.0"]:
+            require_contains(
+                lockfile_text,
+                f'version = "{version}"',
+                "install/overrides split lockfile graph",
+            )
+        for losing_version in ["1.0.0", "2.0.0", "3.0.0"]:
+            if (
+                f'name = "{shared_name}"\nversion = "{losing_version}"'
+                in lockfile_text
+            ):
+                raise SmokeFailure(
+                    "install/overrides source and path precedence: losing override version "
+                    f"{losing_version} remained in the resolved graph"
+                )
+
+        delete_path(project / "node_modules")
+        replay_result = run_command_result(
+            "install/overrides frozen offline replay",
+            project,
+            [
+                str(LPM_BIN),
+                "install",
+                "--offline",
+                "--frozen-lockfile",
+                *install_flags,
+            ],
+            extra_env=env,
+        )
+        if replay_result.returncode != 0:
+            raise SmokeFailure(
+                "install/overrides frozen offline replay failed with exit code "
+                f"{replay_result.returncode}"
+            )
+        require_runtime_graph(
+            project,
+            env,
+            "5.0.0:4.0.0",
+            "install/overrides frozen offline replay",
+        )
+        if lockfile_path.read_bytes() != lockfile_bytes:
+            raise SmokeFailure(
+                "install/overrides frozen offline replay: expected byte-stable lockfile"
+            )
+
+        write_package_json(project / "package.json", project_manifest("6.0.0"))
+        warm_result = run_command_result(
+            "install/overrides warm policy invalidation",
+            project,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=env,
+        )
+        if warm_result.returncode != 0:
+            raise SmokeFailure(
+                "install/overrides warm policy invalidation failed with exit code "
+                f"{warm_result.returncode}"
+            )
+        require_runtime_graph(
+            project,
+            env,
+            "5.0.0:6.0.0",
+            "install/overrides warm policy invalidation",
+        )
+        require_contains(
+            lockfile_path.read_text(encoding="utf-8"),
+            'version = "6.0.0"',
+            "install/overrides warm policy invalidation lockfile",
+        )
+
+        require_parse_failure_without_mutation(
+            Path(multi_segment_dir),
+            env,
+            {
+                "name": "override-multi-segment-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "lpm": {"overrides": {"a>b>c": "1.0.0"}},
+            },
+            "a>b>c",
+            "install/overrides multi-segment selector refusal",
+        )
+        require_parse_failure_without_mutation(
+            Path(invalid_target_dir),
+            env,
+            {
+                "name": "override-invalid-target-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "lpm": {"overrides": {shared_name: "not-a-version-or-range"}},
+            },
+            shared_name,
+            "install/overrides invalid target refusal",
+        )
+
+        nested = Path(nested_dir)
+        write_package_json(
+            nested / "package.json",
+            {
+                "name": "override-nested-object-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {parent_b: "1.0.0"},
+                "overrides": {shared_name: {"nested": "2.0.0"}},
+            },
+        )
+        write_registry_npmrc(nested, registry.registry_url)
+        nested_result = run_command_result(
+            "install/overrides nested object warning",
+            nested,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=env,
+        )
+        if nested_result.returncode != 0:
+            raise SmokeFailure(
+                "install/overrides nested object warning failed with exit code "
+                f"{nested_result.returncode}"
+            )
+        nested_output = nested_result.stdout + nested_result.stderr
+        require_contains(
+            nested_output,
+            "nested object",
+            "install/overrides nested object warning",
+        )
+        nested_runtime = run_command(
+            "install/overrides nested object remains unapplied runtime",
+            nested,
+            ["node", "-e", f"process.stdout.write(require('{parent_b}'))"],
+            extra_env=env,
+        )
+        if nested_runtime != "1.0.0":
+            raise SmokeFailure(
+                "install/overrides nested object warning: expected the natural 1.0.0 selection, "
+                f"got {nested_runtime!r}"
+            )
+
+
+def scenario_install_exec_bundle_positive() -> None:
+    install_flags = ["--no-skills", "--no-editor-setup", "--no-security-summary"]
+    exec_package_name = "smoke-exec-tool"
+    exec_bin_name = "smoke-local-bin"
+    exec_package = {
+        "name": exec_package_name,
+        "dist_tags": {"latest": "1.0.0"},
+        "versions": {
+            "1.0.0": {
+                "metadata_extra": {"dependencies": {}},
+                "package_json_extra": {
+                    "bin": {exec_bin_name: "bin/cli.js"},
+                },
+                "files": {
+                    "bin/cli.js": (
+                        "#!/usr/bin/env node\n"
+                        "const args = process.argv.slice(2)\n"
+                        "process.stdout.write(JSON.stringify({ cwd: process.cwd(), env: process.env.SMOKE_EXEC_ENV, args }))\n"
+                        "if (args.includes('--fail')) process.exit(23)\n"
+                    )
+                },
+            }
+        },
+    }
+
+    with MockRegistry([exec_package]) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-exec-positive-home-"
+    ) as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-exec-positive-project-"
+    ) as project_dir, tempfile.TemporaryDirectory(
+        prefix="lpm-exec-system-path-"
+    ) as system_bin_dir:
+        project = Path(project_dir)
+        write_package_json(
+            project / "package.json",
+            {
+                "name": "exec-positive-smoke",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {exec_package_name: "1.0.0"},
+            },
+        )
+        project.joinpath(".env").write_text(
+            "SMOKE_EXEC_ENV=from-project-dotenv\n",
+            encoding="utf-8",
+        )
+        write_registry_npmrc(project, registry.registry_url)
+        exec_env = smoke_home_env(home_root)
+        run_command(
+            "install/exec-positive install local binary",
+            project,
+            [str(LPM_BIN), "install", *install_flags],
+            extra_env=exec_env,
+        )
+
+        exec_result = run_command_result(
+            "install/exec-positive cwd env and args",
+            project,
+            [str(LPM_BIN), "exec", exec_bin_name, "--flag", "value"],
+            extra_env=exec_env,
+        )
+        if exec_result.returncode != 0:
+            raise SmokeFailure(
+                "install/exec-positive cwd env and args failed with exit code "
+                f"{exec_result.returncode}"
+            )
+        try:
+            exec_payload = json.loads(exec_result.stdout)
+        except json.JSONDecodeError as error:
+            raise SmokeFailure(
+                "install/exec-positive cwd env and args: expected JSON from the local binary, "
+                f"got {exec_result.stdout!r}"
+            ) from error
+        if Path(str(exec_payload.get("cwd"))).resolve() != project.resolve():
+            raise SmokeFailure(
+                "install/exec-positive cwd env and args: expected the child cwd to be the project root"
+            )
+        if exec_payload.get("env") != "from-project-dotenv":
+            raise SmokeFailure(
+                "install/exec-positive cwd env and args: expected project .env injection"
+            )
+        if exec_payload.get("args") != ["--flag", "value"]:
+            raise SmokeFailure(
+                "install/exec-positive cwd env and args: expected forwarded arguments, "
+                f"got {exec_payload.get('args')!r}"
+            )
+
+        failure_result = run_command_result(
+            "install/exec-positive exit code propagation",
+            project,
+            [str(LPM_BIN), "exec", exec_bin_name, "--fail"],
+            extra_env=exec_env,
+        )
+        if failure_result.returncode != 23:
+            raise SmokeFailure(
+                "install/exec-positive exit code propagation: expected exit code 23, "
+                f"got {failure_result.returncode}"
+            )
+
+        marker_path = project / "system-path-bin-ran"
+        system_bin_name = "smoke-system-only-bin"
+        write_executable(
+            Path(system_bin_dir) / system_bin_name,
+            "#!/bin/sh\n"
+            f"touch {shlex.quote(str(marker_path))}\n"
+            "exit 0\n",
+        )
+        no_fallback_result = run_command_result(
+            "install/exec-positive refuses system PATH fallback",
+            project,
+            [str(LPM_BIN), "exec", system_bin_name],
+            extra_env=smoke_home_env(
+                home_root,
+                PATH=os.pathsep.join([system_bin_dir, os.environ.get("PATH", "")]),
+            ),
+        )
+        if no_fallback_result.returncode == 0:
+            raise SmokeFailure(
+                "install/exec-positive refuses system PATH fallback: expected a non-zero exit"
+            )
+        require_contains(
+            no_fallback_result.stdout + no_fallback_result.stderr,
+            "project-local binary",
+            "install/exec-positive refuses system PATH fallback",
+        )
+        require_not_exists(marker_path)
+
+    def bundle_platform() -> str:
+        machine = platform.machine().lower()
+        if sys.platform == "darwin":
+            return "darwin-arm64" if machine in {"arm64", "aarch64"} else "darwin-x64"
+        if sys.platform.startswith("linux"):
+            if machine in {"arm64", "aarch64"}:
+                return "linux-arm64"
+            if machine in {"x86_64", "amd64"}:
+                return "linux-x64"
+        if sys.platform.startswith("win"):
+            return "win-arm64" if machine in {"arm64", "aarch64"} else "win-x64"
+        raise SmokeFailure(f"unsupported Rolldown smoke platform: {sys.platform}/{machine}")
+
+    def hash_engine_tree(engine_dir: Path) -> str:
+        digest = hashlib.sha256()
+        files = sorted(
+            path.relative_to(engine_dir)
+            for path in engine_dir.rglob("*")
+            if path.is_file() and path.name != ".lpm-engine.json"
+        )
+        for relative_path in files:
+            digest.update(relative_path.as_posix().encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(engine_dir.joinpath(relative_path).read_bytes())
+            digest.update(b"\0")
+        return digest.hexdigest()
+
+    def rolldown_sidecar_packages(platform_tag: str) -> list[dict[str, str]]:
+        bindings = {
+            "darwin-arm64": (
+                "node_modules/@rolldown/binding-darwin-arm64",
+                "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.4.tgz",
+                "sha512-Dc5mPD8F5F/FS8i01syd7FTF6yB2fVthH/TRkjwJkzUK6EpoxHtqvZQP5Zwq80/5z19TWYHIg1KOHboCgVx/aQ==",
+            ),
+            "darwin-x64": (
+                "node_modules/@rolldown/binding-darwin-x64",
+                "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.4.tgz",
+                "sha512-fpDm4oBo6SqLvWUYCmFhdde3U9KH2fRNNMeAnAPAIwxRL345xutL0EtEUcuoxsoazdJGv/MuDBQHlCDrtbvqOg==",
+            ),
+            "linux-x64": (
+                "node_modules/@rolldown/binding-linux-x64-gnu",
+                "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.4.tgz",
+                "sha512-4/GyVjmhR+Tc6HLJvwc1sOhPqAZtySiSMesOZyX6JQ5XBxoTDEMKQzvo07NIK6nTon/SivlZqvhzvuVBNQhObQ==",
+            ),
+            "linux-arm64": (
+                "node_modules/@rolldown/binding-linux-arm64-gnu",
+                "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.4.tgz",
+                "sha512-tIP06BeD9EqvECBrPZ+sqdPlYrT+aYaAiu1wYziVx5elRK/ftm33JxVDy2bXGbr6J0CrtirCkR87/X5a2euEng==",
+            ),
+            "win-x64": (
+                "node_modules/@rolldown/binding-win32-x64-msvc",
+                "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.4.tgz",
+                "sha512-UwSDJOg3dqCAejWdxclJjCsh3Qq4vLYMDxmyHqo1btz3stK2VqgwNd3mm5tuIwzSlGIQ/1H9Hr+Zn09mrezNqQ==",
+            ),
+            "win-arm64": (
+                "node_modules/@rolldown/binding-win32-arm64-msvc",
+                "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.4.tgz",
+                "sha512-AWLi0uBRYh6QlE7OKhiz+phZC0qwtij2QZmhmOdsLdFn64m7oMpooE9ICE3lhm9xMb4SpDo2WbHcxX1iFLFtqw==",
+            ),
+        }
+        binding_subdir, binding_url, binding_integrity = bindings[platform_tag]
+        packages = [
+            {
+                "install_subdir": "",
+                "tarball_url": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.4.tgz",
+                "tarball_integrity": "sha512-rSr7irW0K7QRWzjdJXqZowkcRdDtjRduh43rBltnVKd0VFq839l1lJoDvGJb6gl7+4rTTCrPWu+YfujUL8Ug7w==",
+                "tarball_sha256": "smoke-root",
+            },
+            {
+                "install_subdir": "node_modules/@rolldown/pluginutils",
+                "tarball_url": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
+                "tarball_integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
+                "tarball_sha256": "smoke-pluginutils",
+            },
+            {
+                "install_subdir": "node_modules/@oxc-project/types",
+                "tarball_url": "https://registry.npmjs.org/@oxc-project/types/-/types-0.144.0.tgz",
+                "tarball_integrity": "sha512-nuhZIOLuI6TFQ32I/WnUx+SCPY7SdSKwgnFHydAuoS1+Z4BRcaP+RRJmGzl9lw+0OFF7UmaESf7KQRXaNLHypg==",
+                "tarball_sha256": "smoke-types",
+            },
+            {
+                "install_subdir": binding_subdir,
+                "tarball_url": binding_url,
+                "tarball_integrity": binding_integrity,
+                "tarball_sha256": "smoke-binding",
+            },
+        ]
+        return packages
+
+    with tempfile.TemporaryDirectory(prefix="lpm-bundle-positive-home-") as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-bundle-positive-project-"
+    ) as project_dir:
+        project = Path(project_dir)
+        write_package_json(
+            project / "package.json",
+            {"name": "bundle-positive-smoke", "private": True, "version": "0.0.0"},
+        )
+        source_path = project / "src" / "index.js"
+        source_path.parent.mkdir(parents=True, exist_ok=True)
+        source_path.write_text("export const answer = 42\n", encoding="utf-8")
+
+        platform_tag = bundle_platform()
+        marker_path = Path(home_root) / "bundle-invocations.jsonl"
+        engine_dir = (
+            Path(home_root)
+            / ".lpm"
+            / "engines"
+            / "rolldown"
+            / "1.2.4"
+            / platform_tag
+        )
+        engine_script = (
+            "#!/usr/bin/env node\n"
+            "import fs from 'node:fs'\n"
+            "import path from 'node:path'\n"
+            f"const marker = {json.dumps(str(marker_path))}\n"
+            "const args = process.argv.slice(2)\n"
+            "fs.appendFileSync(marker, JSON.stringify({ cwd: process.cwd(), args }) + '\\n')\n"
+            "if (process.env.SMOKE_BUNDLE_FAIL === '1') process.exit(29)\n"
+            "const outIndex = args.indexOf('--dir')\n"
+            "const outDir = outIndex >= 0 ? args[outIndex + 1] : 'dist'\n"
+            "fs.mkdirSync(outDir, { recursive: true })\n"
+            "fs.writeFileSync(path.join(outDir, 'index.js'), 'export const bundled = true\\n')\n"
+            "if (args.includes('--sourcemap')) fs.writeFileSync(path.join(outDir, 'index.js.map'), '{}\\n')\n"
+        )
+        write_executable(engine_dir / "bin" / "cli.mjs", engine_script)
+        write_package_json(
+            engine_dir / "package.json",
+            {
+                "name": "rolldown",
+                "version": "1.2.4",
+                "bin": {"rolldown": "./bin/cli.mjs"},
+            },
+        )
+        sidecar = {
+            "schema_version": 2,
+            "engine_name": "rolldown",
+            "version": "1.2.4",
+            "platform": platform_tag,
+            "entry_rel_path": "bin/cli.mjs",
+            "packages": rolldown_sidecar_packages(platform_tag),
+            "layout_sha256": hash_engine_tree(engine_dir),
+            "verified_at_unix": 0,
+        }
+        write_package_json(engine_dir / ".lpm-engine.json", sidecar)
+
+        bundle_args = [
+            str(LPM_BIN),
+            "bundle",
+            "--entry",
+            "src/index.js",
+            "--out-dir",
+            "dist",
+            "--format",
+            "esm",
+            "--platform",
+            "browser",
+            "--minify",
+            "--sourcemap",
+        ]
+        bundle_result = run_command_result(
+            "install/bundle-positive forwards managed Rolldown flags",
+            project,
+            bundle_args,
+            extra_env=smoke_home_env(home_root),
+        )
+        if bundle_result.returncode != 0:
+            raise SmokeFailure(
+                "install/bundle-positive forwards managed Rolldown flags failed with exit code "
+                f"{bundle_result.returncode}"
+            )
+        require_exists(project / "dist" / "index.js")
+        require_exists(project / "dist" / "index.js.map")
+        invocations = read_jsonl(marker_path)
+        if len(invocations) != 1:
+            raise SmokeFailure(
+                "install/bundle-positive forwards managed Rolldown flags: expected one engine invocation"
+            )
+        invocation = invocations[0]
+        if Path(str(invocation.get("cwd"))).resolve() != project.resolve():
+            raise SmokeFailure(
+                "install/bundle-positive forwards managed Rolldown flags: expected project cwd"
+            )
+        expected_args = [
+            "--input",
+            "src/index.js",
+            "--dir",
+            "dist",
+            "--format",
+            "esm",
+            "--platform",
+            "browser",
+            "--minify",
+            "--sourcemap",
+        ]
+        if invocation.get("args") != expected_args:
+            raise SmokeFailure(
+                "install/bundle-positive forwards managed Rolldown flags: expected "
+                f"{expected_args!r}, got {invocation.get('args')!r}"
+            )
+
+        failure_result = run_command_result(
+            "install/bundle-positive exit code propagation",
+            project,
+            [
+                str(LPM_BIN),
+                "bundle",
+                "--entry",
+                "src/index.js",
+                "--out-dir",
+                "failed-dist",
+            ],
+            extra_env=smoke_home_env(home_root, SMOKE_BUNDLE_FAIL="1"),
+        )
+        if failure_result.returncode != 29:
+            raise SmokeFailure(
+                "install/bundle-positive exit code propagation: expected exit code 29, "
+                f"got {failure_result.returncode}"
+            )
+        require_not_exists(project / "failed-dist")
+
+
 SCENARIOS = {
+    "install-prod-omit": (
+        "Run production and omitted-dependency coverage across cold, warm, offline, and frozen installs while preserving the complete lockfile graph and required production peers.",
+        scenario_install_prod_omit,
+    ),
+    "install-root-lifecycle": (
+        "Run root lifecycle coverage for documented phase ordering, dependency-install boundaries, explicit-package suppression, failure short-circuiting, and recursive workspace ordering.",
+        scenario_install_root_lifecycle,
+    ),
+    "install-registry-auth-isolation": (
+        "Run registry authentication coverage for origin-scoped metadata and tarball credentials, user/project precedence, project env-expansion refusal, and Unix npmrc permission boundaries.",
+        scenario_install_registry_auth_isolation,
+    ),
+    "install-overrides": (
+        "Run override coverage for resolutions/overrides/lpm precedence, immediate-parent specificity, offline frozen replay, warm invalidation, fail-closed selectors, and nested-object warnings.",
+        scenario_install_overrides_application,
+    ),
+    "install-exec-bundle-positive": (
+        "Run positive project-local lpm exec and verified managed Rolldown bundle coverage for cwd, env, argument forwarding, PATH isolation, output creation, and child exit-code propagation.",
+        scenario_install_exec_bundle_positive,
+    ),
     "install-trust": (
         "Run lpm trust coverage for guarded approval refusal plus diff/prune behavior over direct manifest-and-snapshot drift.",
         scenario_install_trust_command,
