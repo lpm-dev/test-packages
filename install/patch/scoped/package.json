@@ -8,7 +8,7 @@
   "lpm": {
     "patchedDependencies": {
       "@smoke/patch-lib@1.0.0": {
-        "path": "patches/@smoke__patch-lib@1.0.0.patch",
+        "path": "patches/@smoke+patch-lib@1.0.0-69ce742173c58a898de7b650cd0dfedd68902aa53af2088e4e3079435ed58f8f.patch",
         "originalIntegrity": "sha512-tN/wMH1jzeilVS3NUNjcs6VBmyYXP90yP32XWdanFucIoIIVQbjxGIGzT3qCFo4Tfz7ZOXlw2SzfiVZ686p/zQ=="
       }
     }

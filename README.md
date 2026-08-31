@@ -99,14 +99,14 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/trust` — mock-registry fixture for direct `lpm trust` runs, covering guarded approval refusal plus diff/prune behavior over direct manifest-and-snapshot drift
 - `install/rebuild` — mock-registry fixture for direct `lpm rebuild` runs, covering guarded trust approval refusal plus deny-mode skip messaging with no script execution
 - `install/patch` — mock-registry fixture for direct `lpm patch` and `lpm patch-commit` runs, covering lockfile-based extraction, patch file generation, manifest registration, reinstall auto-apply, pristine re-extracts, and no-change aborts
-- `install/patch/scoped` — mock-registry fixture for scoped `lpm patch` and `lpm patch-commit` runs, covering `/` to `__` filename sanitization, manifest key preservation, and reinstall auto-apply through the sanitized patch path
+- `install/patch/scoped` — mock-registry fixture for scoped `lpm patch` and `lpm patch-commit` runs, covering collision-resistant `+`-sanitized filenames with key hashes, manifest key preservation, and reinstall auto-apply through the generated patch path
 - `install/patch/binary` — mock-registry fixture for `lpm patch-commit` rejection of binary edits, covering the error path plus the absence of generated patch files or manifest mutation after the failed commit
 - `install/global-install` — mock-registry fixture set for `install -g` manifest writes, `uninstall -g` cleanup, `lpm global` link/unlink/path/list coverage, shim creation, collision hints, outdated reporting, and alias-based collision resolution
 - `workspace/basic` — minimal workspace fixture with one local package and one app consuming it
 - `workspace/complex` — larger workspace fixture with multiple apps, shared packages, and transitive workspace links
 - `workspace/nested-boundary` — workspace fixture with a nested non-workspace child package for boundary regressions
-- `workspace/cycles` — generated workspace fixture set for pure workspace cycles plus the current default-path external registry re-entry linker failure without registry leakage
+- `workspace/cycles` — generated workspace fixture set for pure workspace cycles plus separate same-version workspace and registry instances in an external dependency graph
 - `workspace/rollback` — generated workspace fixture for workspace self-dependency early-abort coverage, asserting the install fails before writing member lockfiles or self-links
-- `workspace/multi-member-prompt` — generated workspace fixture for multi-member filtered install coverage, covering streamed `--json` envelopes and the interactive decline-before-write path
+- `workspace/multi-member-prompt` — generated workspace fixture for multi-member filtered install coverage, covering the atomic workspace `--json` envelope and the interactive decline-before-write path
 - `workspace/targeting` — workspace fixture for `--filter`, `--filter-prod`, `--no-bail`, `--workspace-concurrency`, `--changed-files-ignore-pattern`, `--test-pattern`, `pkg{path}`, `-w`, multi-member writes, uninstall targeting, and `--fail-if-no-match`
 - `workspace/pack` — workspace fixture for `lpm pack --all`, root-level tsdown bin reuse, workspace JSON envelopes, and multi-member watch rejection
