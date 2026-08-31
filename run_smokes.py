@@ -1222,13 +1222,14 @@ class LocalRegistryRequestHandler(BaseHTTPRequestHandler):
     def _serve_route(self, include_body: bool, request_body: bytes = b"") -> None:
         parsed = urlparse(self.path)
         path = unquote(parsed.path)
+        query = parse_qs(parsed.query, keep_blank_values=True)
         self.server.request_log.append((self.command, path))
         self.server.request_details.append(
             {
                 "method": self.command,
                 "path": path,
                 "raw_path": self.path,
-                "query": parse_qs(parsed.query, keep_blank_values=True),
+                "query": query,
                 "headers": {key.lower(): value for key, value in self.headers.items()},
                 "body": request_body,
             }
@@ -1254,6 +1255,22 @@ class LocalRegistryRequestHandler(BaseHTTPRequestHandler):
             if include_body:
                 self.wfile.write(body)
             return
+
+        if self.command == "GET" and path == "/api/registry/-/package/publish-preflight":
+            configured_route = self.server.routes.get(path)
+            if configured_route is not None:
+                content_type, configured_body = configured_route
+                payload = json.loads(configured_body)
+                payload["name"] = query.get("name", [""])[0]
+                payload["version"] = query.get("version", [""])[0]
+                body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", content_type)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if include_body:
+                    self.wfile.write(body)
+                return
 
         if self.command == "PUT" and path.startswith("/api/registry/") and self.server.accept_publish_put:
             body = json.dumps(
@@ -1291,7 +1308,18 @@ class LocalRegistryRequestHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         if include_body:
-            self.wfile.write(body)
+            delay = self.server.slow_route_delays.get(path)
+            try:
+                if delay is None or len(body) < 2:
+                    self.wfile.write(body)
+                else:
+                    midpoint = len(body) // 2
+                    self.wfile.write(body[:midpoint])
+                    self.wfile.flush()
+                    time.sleep(delay)
+                    self.wfile.write(body[midpoint:])
+            except (BrokenPipeError, ConnectionResetError):
+                return
 
 
 class LocalRegistryServer(ThreadingHTTPServer):
@@ -1304,6 +1332,7 @@ class LocalRegistryServer(ThreadingHTTPServer):
         self.token_replace_response: dict[str, object] | None = None
         self.accept_publish_put = False
         self.publish_response: dict[str, object] | None = None
+        self.slow_route_delays: dict[str, float] = {}
 
 
 class MockRegistry:
@@ -1320,6 +1349,7 @@ class MockRegistry:
         publish_response: dict[str, object] | None = None,
         extra_routes: dict[str, tuple[str, bytes]] | None = None,
         extra_method_routes: dict[tuple[str, str], tuple[int, str, bytes]] | None = None,
+        slow_route_delays: dict[str, float] | None = None,
     ):
         self._packages = packages
         self._serve_proxy_metadata = serve_proxy_metadata
@@ -1331,6 +1361,7 @@ class MockRegistry:
         self._publish_response = publish_response
         self._extra_routes = dict(extra_routes or {})
         self._extra_method_routes = dict(extra_method_routes or {})
+        self._slow_route_delays = dict(slow_route_delays or {})
         self._server: LocalRegistryServer | None = None
         self._thread: threading.Thread | None = None
 
@@ -1341,6 +1372,7 @@ class MockRegistry:
         self._server.token_replace_response = self._token_replace_response
         self._server.accept_publish_put = self._accept_publish_put
         self._server.publish_response = self._publish_response
+        self._server.slow_route_delays = self._slow_route_delays
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
         return self
@@ -1478,6 +1510,191 @@ class MockRegistry:
         if path is not None:
             rows = [row for row in rows if row.get("path") == path]
         return rows
+
+    def clear_slow_route_delays(self) -> None:
+        if self._server is None:
+            raise SmokeFailure("mock registry accessed before startup")
+        self._server.slow_route_delays.clear()
+
+
+def vault_sync_payload_digest(encrypted_blob: str, wrapped_key: str) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"lpm-vault-payload\0")
+    for value in [encrypted_blob, wrapped_key]:
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(4, "big"))
+        digest.update(encoded)
+    return digest.hexdigest()
+
+
+def vault_sync_signature(body: bytes, auth_token: str) -> str:
+    key = hashlib.sha256(auth_token.encode("utf-8")).digest()
+    signature = hmac.new(key, body, hashlib.sha256).digest()
+    return base64.b64encode(signature).decode("ascii")
+
+
+class VaultSyncRequestHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self._serve_sync()
+
+    def do_POST(self) -> None:
+        self._serve_sync()
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+    def _serve_sync(self) -> None:
+        parsed = urlparse(self.path)
+        path = unquote(parsed.path)
+        content_length = int(self.headers.get("Content-Length", "0"))
+        request_body = self.rfile.read(content_length) if content_length else b""
+        headers = {key.lower(): value for key, value in self.headers.items()}
+        self.server.request_details.append(
+            {
+                "method": self.command,
+                "path": path,
+                "headers": headers,
+                "body": request_body,
+            }
+        )
+
+        expected_path = f"/api/vaults/{self.server.vault_id}/sync"
+        if path != expected_path:
+            self.send_response(404)
+            self.end_headers()
+            return
+        if headers.get("authorization") != f"Bearer {self.server.auth_token}":
+            self._send_json(401, {"error": "authentication required"})
+            return
+
+        if self.command == "POST":
+            if self.server.conflict_push:
+                self._send_json(
+                    409,
+                    {
+                        "error": "vault version conflict",
+                        "code": "VAULT_VERSION_CONFLICT",
+                        "serverVersion": self.server.version,
+                        "hint": "Run `lpm env pull` then retry the push.",
+                    },
+                )
+                return
+            try:
+                payload = json.loads(request_body)
+            except json.JSONDecodeError:
+                self._send_json(400, {"error": "invalid JSON"})
+                return
+            encrypted_blob = payload.get("encryptedBlob")
+            wrapped_key = payload.get("wrappedKey")
+            if not isinstance(encrypted_blob, str) or not isinstance(wrapped_key, str):
+                self._send_json(400, {"error": "missing encrypted payload fields"})
+                return
+            self.server.encrypted_blob = encrypted_blob
+            self.server.wrapped_key = wrapped_key
+            self.server.version += 1
+            self._send_signed({"version": self.server.version, "status": "synced"})
+            return
+
+        if self.server.encrypted_blob is None or self.server.wrapped_key is None:
+            self._send_json(404, {"error": "vault not found"})
+            return
+        self._send_signed(
+            {
+                "version": self.server.version,
+                "encryptedBlob": self.server.encrypted_blob,
+                "wrappedKey": self.server.wrapped_key,
+            }
+        )
+
+    def _send_signed(self, payload: dict[str, object]) -> None:
+        request_nonce = self.headers.get("X-LPM-Vault-Request-Nonce", "")
+        version = payload["version"]
+        envelope = {
+            **payload,
+            "vaultId": self.server.vault_id,
+            "envelopeVersion": 2,
+            "serverVersion": version,
+            "requestNonce": request_nonce,
+            "cryptoVersion": 2,
+            "scope": "personal",
+        }
+        encrypted_blob = envelope.get("encryptedBlob")
+        wrapped_key = envelope.get("wrappedKey")
+        if isinstance(encrypted_blob, str) and isinstance(wrapped_key, str):
+            envelope["payloadDigest"] = vault_sync_payload_digest(encrypted_blob, wrapped_key)
+        body = json.dumps(envelope, separators=(",", ":")).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("X-LPM-Signature", vault_sync_signature(body, self.server.auth_token))
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def _send_json(self, status: int, payload: dict[str, object]) -> None:
+        body = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+class VaultSyncHTTPServer(ThreadingHTTPServer):
+    def __init__(self, auth_token: str, vault_id: str):
+        super().__init__(("127.0.0.1", 0), VaultSyncRequestHandler)
+        self.auth_token = auth_token
+        self.vault_id = vault_id
+        self.version = 0
+        self.encrypted_blob: str | None = None
+        self.wrapped_key: str | None = None
+        self.conflict_push = False
+        self.request_details: list[dict[str, object]] = []
+
+
+class MockVaultSync:
+    def __init__(self, auth_token: str, vault_id: str):
+        self._auth_token = auth_token
+        self._vault_id = vault_id
+        self._server: VaultSyncHTTPServer | None = None
+        self._thread: threading.Thread | None = None
+
+    def __enter__(self) -> MockVaultSync:
+        self._server = VaultSyncHTTPServer(self._auth_token, self._vault_id)
+        self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
+        self._thread.start()
+        return self
+
+    def __exit__(self, exc_type, exc, tb) -> None:
+        if self._server is not None:
+            self._server.shutdown()
+            self._server.server_close()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+
+    @property
+    def url(self) -> str:
+        server = self._require_server()
+        host, port = server.server_address
+        return f"http://{host}:{port}"
+
+    @property
+    def conflict_push(self) -> bool:
+        return self._require_server().conflict_push
+
+    @conflict_push.setter
+    def conflict_push(self, enabled: bool) -> None:
+        self._require_server().conflict_push = enabled
+
+    def requests(self, method: str | None = None) -> list[dict[str, object]]:
+        rows = list(self._require_server().request_details)
+        if method is not None:
+            rows = [row for row in rows if row.get("method") == method]
+        return rows
+
+    def _require_server(self) -> VaultSyncHTTPServer:
+        if self._server is None:
+            raise SmokeFailure("mock env sync server accessed before startup")
+        return self._server
 
 
 class _RemoteCacheHTTPServer(ThreadingHTTPServer):
@@ -1968,6 +2185,22 @@ def seed_refresh_backed_session(
     refresh_token: str,
     expires_at: str,
 ) -> None:
+    helper_binary = LPM_TARGET_DIR / "debug" / "examples" / "seed_refresh_backed_session"
+    if helper_binary.is_file():
+        run_command(
+            "seed refresh-backed session",
+            RUST_CLIENT_ROOT,
+            [
+                str(helper_binary),
+                registry_url,
+                access_token,
+                refresh_token,
+                expires_at,
+            ],
+            extra_env=auth_env,
+        )
+        return
+
     cargo_env = dict(auth_env)
     if "CARGO_HOME" not in cargo_env:
         if REAL_CARGO_HOME:
@@ -2006,6 +2239,16 @@ def seed_access_session(
     registry_url: str,
     access_token: str,
 ) -> None:
+    helper_binary = LPM_TARGET_DIR / "debug" / "examples" / "seed_access_session"
+    if helper_binary.is_file():
+        run_command(
+            "seed access session",
+            RUST_CLIENT_ROOT,
+            [str(helper_binary), registry_url, access_token],
+            extra_env=auth_env,
+        )
+        return
+
     cargo_env = dict(auth_env)
     if "CARGO_HOME" not in cargo_env:
         if REAL_CARGO_HOME:
@@ -8492,6 +8735,84 @@ def scenario_install_catalog() -> None:
                 "install/catalog force default catalog flag: expected --catalog to save catalog:"
             )
 
+        inspection_manifest = read_json_file(force_default_fixture / "package.json")
+        inspection_manifest["catalogs"]["default"]["unused-lib"] = "^9.9.9"
+        write_package_json(force_default_fixture / "package.json", inspection_manifest)
+        inspection_paths = [
+            force_default_fixture / "package.json",
+            force_default_fixture / "lpm.lock",
+            force_default_fixture / "lpm.lockb",
+            force_default_fixture / ".lpm" / "install-hash",
+        ]
+        inspection_before = {
+            path: path.read_bytes() if path.exists() else None for path in inspection_paths
+        }
+        unused_result = run_command_result(
+            "install/catalog list unused json",
+            force_default_fixture,
+            [str(LPM_BIN), "--json", "catalog", "list", "--unused"],
+            extra_env=scenario_env,
+        )
+        unused = parse_json_stdout("install/catalog list unused json", unused_result)
+        if unused_result.returncode != 0 or unused.get("success") is not True:
+            raise SmokeFailure("install/catalog list --unused must succeed")
+        if (
+            unused.get("mode") != "unused"
+            or unused.get("count") != 1
+            or unused.get("used_count") != 1
+            or unused.get("unused_count") != 1
+        ):
+            raise SmokeFailure(
+                f"install/catalog list --unused returned incorrect counts: {unused!r}"
+            )
+        entries = unused.get("entries")
+        if not isinstance(entries, list) or entries != [
+            {
+                "catalog": "default",
+                "package": "unused-lib",
+                "specifier": "^9.9.9",
+                "used": False,
+            }
+        ]:
+            raise SmokeFailure(
+                f"install/catalog list --unused returned incorrect provenance: {entries!r}"
+            )
+
+        resolved_result = run_command_result(
+            "install/catalog show resolved json",
+            force_default_fixture,
+            [str(LPM_BIN), "--json", "catalog", "show", "--resolved"],
+            extra_env=scenario_env,
+        )
+        resolved = parse_json_stdout(
+            "install/catalog show resolved json", resolved_result
+        )
+        if resolved_result.returncode != 0 or resolved.get("success") is not True:
+            raise SmokeFailure("install/catalog show --resolved must succeed")
+        resolved_entries = resolved.get("entries")
+        if not isinstance(resolved_entries, list) or resolved.get("count") != 1:
+            raise SmokeFailure(
+                f"install/catalog show --resolved returned incorrect count: {resolved!r}"
+            )
+        resolved_entry = resolved_entries[0]
+        expected_resolved = {
+            "catalog": "default",
+            "package": "is-positive",
+            "specifier": "^2.0.0",
+            "version": "2.0.0",
+            "reference": "catalog:",
+        }
+        if resolved_entry != expected_resolved:
+            raise SmokeFailure(
+                f"install/catalog show --resolved returned incorrect provenance: {resolved_entry!r}"
+            )
+        for path, contents in inspection_before.items():
+            current = path.read_bytes() if path.exists() else None
+            if current != contents:
+                raise SmokeFailure(
+                    f"install/catalog inspection commands mutated {path}"
+                )
+
         prefer_fixture = reset_catalog_fixture(
             "prefer",
             CATALOG_PREFER_BASELINE_PACKAGE_JSON,
@@ -13628,6 +13949,71 @@ def scenario_install_graph_command() -> None:
             raise SmokeFailure(
                 "install/graph filter substring json: expected unrelated subtree nodes to be pruned"
             )
+
+        why_paths = [
+            fixture / "package.json",
+            fixture / "lpm.lock",
+            fixture / "lpm.lockb",
+            fixture / ".lpm" / "install-hash",
+        ]
+        why_before = {
+            path: path.read_bytes() if path.exists() else None for path in why_paths
+        }
+        why_result = run_command_result(
+            "install/graph why transitive json",
+            fixture,
+            [str(LPM_BIN), "--json", "graph", "--why", "ms"],
+            extra_env=scenario_env,
+        )
+        why = parse_json_stdout("install/graph why transitive json", why_result)
+        if why_result.returncode != 0 or why.get("success") is not True:
+            raise SmokeFailure("install/graph why transitive json must succeed")
+        if why.get("target") != "ms" or why.get("found") is not True or why.get("path_count") != 2:
+            raise SmokeFailure(
+                f"install/graph why transitive json returned incorrect summary: {why!r}"
+            )
+        expected_paths = {
+            (
+                "graph-test-project@1.0.0",
+                "express@4.22.1",
+                "debug@2.6.9",
+                "ms@2.0.0",
+            ),
+            (
+                "graph-test-project@1.0.0",
+                "vitest@1.6.0",
+                "ms@2.1.3",
+            ),
+        }
+        actual_paths = {
+            tuple(path)
+            for path in why.get("paths", [])
+            if isinstance(path, list)
+        }
+        if actual_paths != expected_paths:
+            raise SmokeFailure(
+                f"install/graph why transitive json returned incorrect paths: {actual_paths!r}"
+            )
+        if why.get("applied_overrides") != [] or why.get("applied_patches") != []:
+            raise SmokeFailure(
+                "install/graph why transitive json expected empty override and patch provenance"
+            )
+        why_human = run_command(
+            "install/graph why transitive human parity",
+            fixture,
+            [str(LPM_BIN), "graph", "--why", "ms"],
+            extra_env=scenario_env,
+        )
+        for needle in ["express@4.22.1", "debug@2.6.9", "ms@2.0.0", "vitest@1.6.0", "ms@2.1.3"]:
+            require_contains(
+                why_human,
+                needle,
+                "install/graph why transitive human parity",
+            )
+        for path, contents in why_before.items():
+            current = path.read_bytes() if path.exists() else None
+            if current != contents:
+                raise SmokeFailure(f"install/graph why mutated {path}")
 
         depth_json_result = run_command_result(
             "install/graph json depth 2",
@@ -29016,7 +29402,1264 @@ def scenario_install_exec_bundle_positive() -> None:
         require_not_exists(project / "failed-dist")
 
 
+def scenario_install_source_protocol_matrix() -> None:
+    commit = "779219540f66cecaa159da32b3b8936697ba10a7"
+    github_package = "wa-sqlite"
+    github_archive = build_package_tarball(
+        github_package,
+        "1.0.9",
+        {},
+        {"github-marker.txt": "branch-locked\n"},
+    )
+    jsr_package = "@jsr/std__path"
+    registry_packages = [
+        {
+            "name": jsr_package,
+            "dist_tags": {"latest": "1.1.6"},
+            "versions": {
+                "1.1.6": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {"jsr-marker.txt": "folded-route\n"},
+                }
+            },
+        }
+    ]
+    extra_routes = {
+        "/repos/rhashimoto/wa-sqlite/commits/main": (
+            "application/json",
+            json.dumps({"sha": commit}, separators=(",", ":")).encode("utf-8"),
+        ),
+        f"/rhashimoto/wa-sqlite/tar.gz/{commit}": (
+            "application/octet-stream",
+            github_archive,
+        ),
+    }
+
+    with MockRegistry(registry_packages, extra_routes=extra_routes) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-source-protocols-"
+    ) as project_root, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
+        project = Path(project_root)
+        file_source = project / "vendor" / "file-source"
+        link_source = project / "vendor" / "link-source"
+        write_package_json(
+            file_source / "package.json",
+            {"name": "local-file-source", "version": "1.0.0"},
+        )
+        write_package_json(
+            link_source / "package.json",
+            {"name": "local-link-source", "version": "1.0.0"},
+        )
+        file_source.joinpath("marker.txt").write_text("file-v1\n", encoding="utf-8")
+        link_source.joinpath("marker.txt").write_text("link-v1\n", encoding="utf-8")
+        write_package_json(
+            project / "package.json",
+            {
+                "name": "source-protocol-matrix-smoke",
+                "private": True,
+                "version": "1.0.0",
+                "dependencies": {
+                    "local-file": "file:./vendor/file-source",
+                    "local-link": "link:./vendor/link-source",
+                    github_package: "github:rhashimoto/wa-sqlite#main",
+                    "@std/path": "jsr:@std/path@1.1.6",
+                },
+            },
+        )
+        project.joinpath(".npmrc").write_text(
+            f"registry={registry.registry_url}\n@jsr:registry={registry.registry_url}\n",
+            encoding="utf-8",
+        )
+        env = smoke_home_env(
+            home_root,
+            LPM_GITHUB_API_BASE_URL=registry.registry_url.rstrip("/"),
+            LPM_GITHUB_CODELOAD_BASE_URL=registry.registry_url.rstrip("/"),
+        )
+        install_args = [
+            str(LPM_BIN),
+            "install",
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+        run_command("install/source-protocol matrix initial install", project, install_args, extra_env=env)
+
+        lockfile = read_optional_text(project / "lpm.lock")
+        for needle, context in [
+            ("directory+./vendor/file-source", "file source identity"),
+            ("link+./vendor/link-source", "link source identity"),
+            (
+                f"git+https://github.com/rhashimoto/wa-sqlite.git#{commit}",
+                "GitHub branch commit lock",
+            ),
+            (jsr_package, "folded JSR package identity"),
+        ]:
+            require_contains(lockfile, needle, f"install/source-protocol {context}")
+        require_contains(
+            lockfile,
+            "github:rhashimoto/wa-sqlite#main",
+            "install/source-protocol importer preserves GitHub branch request",
+        )
+        parsed_lockfile = tomllib.loads(lockfile)
+        root_aliases = parsed_lockfile.get("root-aliases", {})
+        if root_aliases.get("@std/path") != jsr_package:
+            raise SmokeFailure(
+                "install/source-protocol JSR alias mapping was not preserved in root-aliases"
+            )
+
+        if project.joinpath("node_modules/local-file/marker.txt").read_text(encoding="utf-8") != "file-v1\n":
+            raise SmokeFailure("install/source-protocol file: source content did not install")
+        if project.joinpath("node_modules/local-link/marker.txt").read_text(encoding="utf-8") != "link-v1\n":
+            raise SmokeFailure("install/source-protocol link: source content did not install")
+        require_exists(project / "node_modules" / github_package / "github-marker.txt")
+        require_exists(project / "node_modules" / "@std" / "path" / "jsr-marker.txt")
+
+        network_requests_before_replay = len(registry.request_details())
+        delete_path(project / "node_modules")
+        delete_path(project / ".lpm")
+        run_command(
+            "install/source-protocol frozen offline replay",
+            project,
+            [*install_args, "--offline", "--frozen-lockfile"],
+            extra_env=env,
+        )
+        if len(registry.request_details()) != network_requests_before_replay:
+            raise SmokeFailure(
+                "install/source-protocol frozen offline replay unexpectedly contacted the mock network"
+            )
+        require_exists(project / "node_modules" / github_package / "github-marker.txt")
+        require_exists(project / "node_modules" / "@std" / "path" / "jsr-marker.txt")
+
+        write_package_json(
+            file_source / "package.json",
+            {"name": "local-file-source", "version": "1.0.1"},
+        )
+        write_package_json(
+            link_source / "package.json",
+            {"name": "local-link-source", "version": "1.0.1"},
+        )
+        file_source.joinpath("marker.txt").write_text("file-v2\n", encoding="utf-8")
+        link_source.joinpath("marker.txt").write_text("link-v2\n", encoding="utf-8")
+        run_command("install/source-protocol local refresh", project, install_args, extra_env=env)
+        for local_name, expected_marker in [
+            ("local-file", "file-v2\n"),
+            ("local-link", "link-v2\n"),
+        ]:
+            installed = project / "node_modules" / local_name
+            if read_json_file(installed / "package.json").get("version") != "1.0.1":
+                raise SmokeFailure(
+                    f"install/source-protocol {local_name} refresh did not update package identity"
+                )
+            if installed.joinpath("marker.txt").read_text(encoding="utf-8") != expected_marker:
+                raise SmokeFailure(
+                    f"install/source-protocol {local_name} refresh did not update source content"
+                )
+
+        unsafe_project = project / "unsafe-url"
+        write_package_json(
+            unsafe_project / "package.json",
+            {
+                "name": "unsafe-url-smoke",
+                "private": True,
+                "version": "1.0.0",
+                "dependencies": {"unsafe-tarball": "http://example.invalid/unsafe.tgz"},
+            },
+        )
+        unsafe_result = run_command_result(
+            "install/source-protocol unsafe URL rejection",
+            unsafe_project,
+            [str(LPM_BIN), "install", "--no-skills", "--no-editor-setup", "--no-security-summary"],
+            extra_env=env,
+        )
+        if unsafe_result.returncode == 0:
+            raise SmokeFailure("install/source-protocol unsafe HTTP URL unexpectedly succeeded")
+        unsafe_output = unsafe_result.stdout + unsafe_result.stderr
+        if "HTTPS" not in unsafe_output and "insecure" not in unsafe_output.lower():
+            raise SmokeFailure(
+                "install/source-protocol unsafe HTTP URL rejection did not explain the secure URL policy"
+            )
+        require_not_exists(unsafe_project / "lpm.lock")
+        require_not_exists(unsafe_project / "node_modules")
+
+
+def scenario_install_version_release() -> None:
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-version-") as version_root, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        project = Path(version_root)
+        env = smoke_home_env(home_root)
+        write_package_json(
+            project / "package.json",
+            {"name": "version-smoke", "version": "1.2.3", "license": "MIT"},
+        )
+        project.joinpath("README.md").write_text("version smoke\n", encoding="utf-8")
+        project.joinpath(".gitignore").write_text(".lpm/\n", encoding="utf-8")
+        for args in [
+            ["git", "init", "-q"],
+            ["git", "config", "user.name", "LPM Smoke"],
+            ["git", "config", "user.email", "smoke@lpm.dev"],
+            ["git", "add", "package.json", "README.md", ".gitignore"],
+            ["git", "commit", "-qm", "initial"],
+        ]:
+            run_command("install/version git setup", project, args, extra_env=env)
+
+        manifest_before = (project / "package.json").read_bytes()
+        head_before = run_command(
+            "install/version read initial HEAD", project, ["git", "rev-parse", "HEAD"], extra_env=env
+        ).strip()
+        dry_result = run_command_result(
+            "install/version dry-run immutability",
+            project,
+            [str(LPM_BIN), "--json", "version", "patch", "--dry-run"],
+            extra_env=env,
+        )
+        dry_envelope = parse_json_stdout("install/version dry-run immutability", dry_result)
+        if dry_result.returncode != 0 or dry_envelope.get("success") is not True:
+            raise SmokeFailure("install/version dry-run must succeed with a JSON envelope")
+        if dry_envelope.get("dry_run") is not True:
+            raise SmokeFailure("install/version dry-run envelope must report dry_run=true")
+        if (project / "package.json").read_bytes() != manifest_before:
+            raise SmokeFailure("install/version dry-run mutated package.json")
+        if run_command("install/version verify dry HEAD", project, ["git", "rev-parse", "HEAD"], extra_env=env).strip() != head_before:
+            raise SmokeFailure("install/version dry-run created a commit")
+        if run_command("install/version verify dry tags", project, ["git", "tag", "--list"], extra_env=env).strip():
+            raise SmokeFailure("install/version dry-run created a tag")
+
+        applied_result = run_command_result(
+            "install/version commit and tag",
+            project,
+            [str(LPM_BIN), "--json", "version", "patch"],
+            extra_env=env,
+        )
+        applied = parse_json_stdout("install/version commit and tag", applied_result)
+        if applied_result.returncode != 0 or applied.get("success") is not True:
+            raise SmokeFailure("install/version patch must succeed")
+        if read_json_file(project / "package.json").get("version") != "1.2.4":
+            raise SmokeFailure("install/version patch did not update package.json to 1.2.4")
+        if run_command("install/version inspect tag", project, ["git", "tag", "--list", "v1.2.4"], extra_env=env).strip() != "v1.2.4":
+            raise SmokeFailure("install/version patch did not create v1.2.4")
+        if run_command("install/version inspect commit", project, ["git", "log", "-1", "--pretty=%s"], extra_env=env).strip() != "v1.2.4":
+            raise SmokeFailure("install/version patch did not create the expected commit")
+        if run_command("install/version inspect clean tree", project, ["git", "status", "--porcelain"], extra_env=env).strip():
+            raise SmokeFailure("install/version patch left the Git tree dirty")
+
+        project.joinpath("README.md").write_text("dirty\n", encoding="utf-8")
+        dirty_head = run_command("install/version dirty HEAD", project, ["git", "rev-parse", "HEAD"], extra_env=env).strip()
+        dirty_result = run_command_result(
+            "install/version dirty-tree refusal",
+            project,
+            [str(LPM_BIN), "version", "minor"],
+            extra_env=env,
+        )
+        if dirty_result.returncode == 0:
+            raise SmokeFailure("install/version dirty-tree bump unexpectedly succeeded")
+        require_contains(
+            dirty_result.stdout + dirty_result.stderr,
+            "working tree must be clean",
+            "install/version dirty-tree refusal",
+        )
+        if read_json_file(project / "package.json").get("version") != "1.2.4":
+            raise SmokeFailure("install/version dirty-tree refusal mutated package.json")
+        if run_command("install/version verify dirty HEAD", project, ["git", "rev-parse", "HEAD"], extra_env=env).strip() != dirty_head:
+            raise SmokeFailure("install/version dirty-tree refusal created a commit")
+
+    with tempfile.TemporaryDirectory(prefix="lpm-smoke-release-") as release_root, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-home-"
+    ) as home_root:
+        workspace = Path(release_root)
+        env = smoke_home_env(home_root)
+        write_package_json(
+            workspace / "package.json",
+            {
+                "name": "release-smoke-root",
+                "private": True,
+                "version": "0.0.0",
+                "workspaces": ["packages/*"],
+            },
+        )
+        write_package_json(
+            workspace / "packages" / "core" / "package.json",
+            {"name": "release-core", "version": "1.2.3", "license": "MIT"},
+        )
+        write_package_json(
+            workspace / "packages" / "app" / "package.json",
+            {
+                "name": "release-app",
+                "version": "1.0.0",
+                "license": "MIT",
+                "dependencies": {"release-core": "^1.2.3"},
+            },
+        )
+        write_package_json(
+            workspace / "packages" / "core" / "lpm.json",
+            {"publish": {"lpm": {"name": "@lpm.dev/smoke.release-core"}}},
+        )
+        write_package_json(
+            workspace / "packages" / "app" / "lpm.json",
+            {"publish": {"lpm": {"name": "@lpm.dev/smoke.release-app"}}},
+        )
+        workspace.joinpath("packages/core/index.js").write_text("module.exports = 1\n", encoding="utf-8")
+        workspace.joinpath("packages/app/index.js").write_text("module.exports = 2\n", encoding="utf-8")
+        manifests_before = {
+            path: path.read_bytes()
+            for path in [
+                workspace / "packages" / "core" / "package.json",
+                workspace / "packages" / "app" / "package.json",
+            ]
+        }
+        plan_result = run_command_result(
+            "install/release plan internal dependency update",
+            workspace,
+            [str(LPM_BIN), "--json", "release", "plan", "--filter", "release-core", "--bump", "major"],
+            extra_env=env,
+        )
+        plan = parse_json_stdout("install/release plan internal dependency update", plan_result)
+        if plan_result.returncode != 0 or plan.get("success") is not True:
+            raise SmokeFailure("install/release plan must succeed")
+        updates = plan.get("dependency_updates")
+        if not isinstance(updates, list) or not any(
+            isinstance(update, dict)
+            and update.get("dependent") == "release-app"
+            and update.get("dependency") == "release-core"
+            and update.get("new_spec") == "^2.0.0"
+            for update in updates
+        ):
+            raise SmokeFailure("install/release plan omitted the internal dependent range update")
+        for path, contents in manifests_before.items():
+            if path.read_bytes() != contents:
+                raise SmokeFailure(f"install/release plan mutated {path}")
+
+        apply_result = run_command_result(
+            "install/release apply internal dependency update",
+            workspace,
+            [str(LPM_BIN), "--json", "release", "apply", "--filter", "release-core", "--bump", "major"],
+            extra_env=env,
+        )
+        apply = parse_json_stdout("install/release apply internal dependency update", apply_result)
+        if apply_result.returncode != 0 or apply.get("success") is not True:
+            raise SmokeFailure("install/release apply must succeed")
+        if read_json_file(workspace / "packages" / "core" / "package.json").get("version") != "2.0.0":
+            raise SmokeFailure("install/release apply did not bump release-core to 2.0.0")
+        app_manifest = read_json_file(workspace / "packages" / "app" / "package.json")
+        if app_manifest.get("dependencies", {}).get("release-core") != "^2.0.0":
+            raise SmokeFailure("install/release apply did not update release-app's internal range")
+
+        preflight_path = "/api/registry/-/package/publish-preflight"
+        preflight_response = json.dumps(
+            {"success": True, "packageExists": False}, separators=(",", ":")
+        ).encode("utf-8")
+        with MockRegistry(
+            [],
+            extra_routes={preflight_path: ("application/json", preflight_response)},
+            accept_publish_put=True,
+        ) as registry:
+            publish_result = run_command_result(
+                "install/release publish dry-run dependency order",
+                workspace,
+                [
+                    str(LPM_BIN),
+                    "--json",
+                    "--registry",
+                    registry.registry_url,
+                    "--insecure",
+                    "release",
+                    "publish",
+                    "--all",
+                    "--dry-run",
+                    "--lpm",
+                    "--ignore-scripts",
+                    "--no-provenance",
+                ],
+                extra_env=env,
+            )
+            publish = parse_json_stdout(
+                "install/release publish dry-run dependency order", publish_result
+            )
+            if publish_result.returncode != 0 or publish.get("success") is not True:
+                raise SmokeFailure("install/release publish --dry-run must succeed")
+            results = publish.get("results")
+            if not isinstance(results, list) or [row.get("name") for row in results] != [
+                "release-core",
+                "release-app",
+            ]:
+                raise SmokeFailure(
+                    f"install/release publish dry-run returned the wrong dependency order: {results!r}"
+                )
+            writes = [
+                row
+                for row in registry.request_details()
+                if row.get("method") in {"POST", "PUT", "DELETE"}
+            ]
+            if writes:
+                raise SmokeFailure(
+                    f"install/release publish dry-run performed registry writes: {writes!r}"
+                )
+
+
+def scenario_install_licenses_installed_tree() -> None:
+    direct_name = "license-direct"
+    copyleft_name = "license-copyleft"
+    near_match_name = "license-near-match"
+    missing_name = "license-missing"
+    registry_packages = [
+        {
+            "name": direct_name,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {
+                            copyleft_name: "1.0.0",
+                            near_match_name: "1.0.0",
+                            missing_name: "1.0.0",
+                        }
+                    },
+                    "package_json_extra": {
+                        "license": "MIT",
+                        "dependencies": {
+                            copyleft_name: "1.0.0",
+                            near_match_name: "1.0.0",
+                            missing_name: "1.0.0",
+                        },
+                    },
+                    "files": {},
+                }
+            },
+        },
+        {
+            "name": copyleft_name,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"license": "GPL-3.0"},
+                    "files": {},
+                }
+            },
+        },
+        {
+            "name": near_match_name,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"license": "GPL-3.0-or-later"},
+                    "files": {},
+                }
+            },
+        },
+        {
+            "name": missing_name,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                }
+            },
+        },
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-licenses-"
+    ) as projects_root, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
+        env = smoke_home_env(home_root)
+        for linker in ["hoisted", "isolated"]:
+            project = Path(projects_root) / linker
+            write_package_json(
+                project / "package.json",
+                {
+                    "name": f"licenses-{linker}-smoke",
+                    "private": True,
+                    "version": "1.0.0",
+                    "license": "Apache-2.0",
+                    "dependencies": {direct_name: "1.0.0"},
+                },
+            )
+            write_registry_npmrc(project, registry.registry_url)
+            run_command(
+                f"install/licenses {linker} install",
+                project,
+                [
+                    str(LPM_BIN),
+                    "install",
+                    "--linker",
+                    linker,
+                    "--no-skills",
+                    "--no-editor-setup",
+                    "--no-security-summary",
+                ],
+                extra_env=env,
+            )
+
+            inventory_result = run_command_result(
+                f"install/licenses {linker} JSON inventory",
+                project,
+                [str(LPM_BIN), "--json", "licenses"],
+                extra_env=env,
+            )
+            inventory = parse_json_stdout(
+                f"install/licenses {linker} JSON inventory", inventory_result
+            )
+            if inventory_result.returncode != 0 or inventory.get("success") is not True:
+                raise SmokeFailure(f"install/licenses {linker} inventory must succeed")
+            packages = inventory.get("packages")
+            if not isinstance(packages, list) or inventory.get("count") != 4:
+                raise SmokeFailure(
+                    f"install/licenses {linker} expected four installed package rows: {inventory!r}"
+                )
+            rows = {
+                row.get("name"): row
+                for row in packages
+                if isinstance(row, dict) and isinstance(row.get("name"), str)
+            }
+            for transitive in [copyleft_name, near_match_name, missing_name]:
+                if rows.get(transitive, {}).get("scope") != "required":
+                    raise SmokeFailure(
+                        f"install/licenses {linker} did not classify {transitive} as a required transitive"
+                    )
+            if rows.get(copyleft_name, {}).get("copyleft") is not True:
+                raise SmokeFailure(f"install/licenses {linker} missed the copyleft package")
+            if rows.get(missing_name, {}).get("missing") is not True:
+                raise SmokeFailure(f"install/licenses {linker} missed the absent license")
+
+            gate_result = run_command_result(
+                f"install/licenses {linker} missing and copyleft gate",
+                project,
+                [str(LPM_BIN), "--json", "licenses", "--fail-on", "copyleft,missing"],
+                extra_env=env,
+            )
+            gate = parse_json_stdout(
+                f"install/licenses {linker} missing and copyleft gate", gate_result
+            )
+            if gate_result.returncode != 1 or gate.get("success") is not False:
+                raise SmokeFailure(
+                    f"install/licenses {linker} policy gate must exit 1 with success=false"
+                )
+            summary = gate.get("summary")
+            if not isinstance(summary, dict) or summary.get("copyleft") != 2 or summary.get("missing") != 1:
+                raise SmokeFailure(
+                    f"install/licenses {linker} gate summary was incorrect: {summary!r}"
+                )
+
+            deny_result = run_command_result(
+                f"install/licenses {linker} exact deny matching",
+                project,
+                [str(LPM_BIN), "--json", "licenses", "--deny", "GPL-3.0"],
+                extra_env=env,
+            )
+            deny = parse_json_stdout(
+                f"install/licenses {linker} exact deny matching", deny_result
+            )
+            if deny_result.returncode != 1 or deny.get("summary", {}).get("denied") != 1:
+                raise SmokeFailure(
+                    f"install/licenses {linker} exact deny must reject exactly one package"
+                )
+            deny_rows = {
+                row.get("name"): row
+                for row in deny.get("packages", [])
+                if isinstance(row, dict)
+            }
+            if deny_rows.get(copyleft_name, {}).get("denied") is not True:
+                raise SmokeFailure(f"install/licenses {linker} exact GPL-3.0 deny did not match")
+            if deny_rows.get(near_match_name, {}).get("denied") is not False:
+                raise SmokeFailure(
+                    f"install/licenses {linker} exact GPL-3.0 deny matched GPL-3.0-or-later"
+                )
+
+
+def write_policy_smoke_extension(
+    home_root: str | Path,
+    script_path: Path,
+    counter_path: Path,
+    *,
+    action: str,
+    mode: str,
+    on_error: str,
+    forced_exit: int | None = None,
+) -> None:
+    command = [
+        sys.executable,
+        str(script_path),
+        "--action",
+        action,
+        "--counter",
+        str(counter_path),
+    ]
+    if forced_exit is not None:
+        command.extend(["--exit", str(forced_exit)])
+    encoded_command = ", ".join(json.dumps(value) for value in command)
+    config_path = Path(smoke_home_path(home_root)) / "config.toml"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        "[policy.extensions.fixture]\n"
+        f"command = [{encoded_command}]\n"
+        f"mode = {json.dumps(mode)}\n"
+        f"on-error = {json.dumps(on_error)}\n",
+        encoding="utf-8",
+    )
+
+
+def scenario_install_policy_extension_boundary() -> None:
+    package_name = "policy-boundary-pkg"
+    registry_packages = [
+        {
+            "name": package_name,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {"license": "MIT"},
+                    "files": {},
+                }
+            },
+        }
+    ]
+    extension_source = """#!/usr/bin/env python3
+import argparse
+import json
+import pathlib
+import sys
+
+parser = argparse.ArgumentParser()
+parser.add_argument('--action', required=True)
+parser.add_argument('--counter', required=True)
+parser.add_argument('--exit', type=int)
+args = parser.parse_args()
+counter = pathlib.Path(args.counter)
+count = int(counter.read_text() if counter.exists() else '0') + 1
+counter.write_text(str(count))
+request = json.load(sys.stdin)
+if args.exit is not None:
+    print('forced extension failure', file=sys.stderr)
+    raise SystemExit(args.exit)
+package = request['packages'][0]
+json.dump({
+    'schema_version': 1,
+    'decisions': [{
+        'name': package['name'],
+        'version': package['version'],
+        'action': args.action,
+        'code': 'smoke-policy',
+        'reason': 'packaged CLI boundary fixture',
+    }],
+}, sys.stdout)
+"""
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-policy-"
+    ) as project_root, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
+        project = Path(project_root)
+        script_path = project / "policy-extension.py"
+        counter_path = project / "policy-extension-count"
+        script_path.write_text(extension_source, encoding="utf-8")
+        write_package_json(
+            project / "package.json",
+            {
+                "name": "policy-extension-boundary-smoke",
+                "private": True,
+                "version": "1.0.0",
+                "dependencies": {package_name: "1.0.0"},
+            },
+        )
+        write_registry_npmrc(project, registry.registry_url)
+        env = smoke_home_env(home_root)
+        write_policy_smoke_extension(
+            home_root,
+            script_path,
+            counter_path,
+            action="warn",
+            mode="enforce",
+            on_error="block",
+        )
+
+        for command, expected_field in [
+            (["policy", "list"], ("enabled_count", 1)),
+            (["policy", "status"], ("enabled", True)),
+            (["policy", "doctor"], ("enabled_count", 1)),
+        ]:
+            label = " ".join(command)
+            result = run_command_result(
+                f"install/policy-extension inspection {label}",
+                project,
+                [str(LPM_BIN), "--json", *command],
+                extra_env=env,
+            )
+            envelope = parse_json_stdout(
+                f"install/policy-extension inspection {label}", result
+            )
+            if result.returncode != 0 or envelope.get(expected_field[0]) != expected_field[1]:
+                raise SmokeFailure(f"install/policy-extension {label} returned an invalid envelope")
+            if counter_path.exists():
+                raise SmokeFailure(f"install/policy-extension {label} launched extension code")
+
+        doctor_result = run_command_result(
+            "install/policy-extension top-level doctor inspection",
+            project,
+            [str(LPM_BIN), "--json", "doctor"],
+            extra_env=env,
+        )
+        doctor = parse_json_stdout(
+            "install/policy-extension top-level doctor inspection", doctor_result
+        )
+        doctor_checks = doctor.get("checks", [])
+        if doctor.get("success") is not True or not any(
+            isinstance(check, dict) and check.get("code") == "policy_extensions_configured"
+            for check in doctor_checks
+        ):
+            raise SmokeFailure(
+                "install/policy-extension top-level doctor omitted the configured-policy inspection"
+            )
+        if counter_path.exists():
+            raise SmokeFailure("install/policy-extension top-level doctor launched extension code")
+
+        test_result = run_command_result(
+            "install/policy-extension explicit test launches extension",
+            project,
+            [str(LPM_BIN), "--json", "policy", "test", "fixture", "--package", f"{package_name}@1.0.0"],
+            extra_env=env,
+        )
+        test_envelope = parse_json_stdout(
+            "install/policy-extension explicit test launches extension", test_result
+        )
+        if test_result.returncode != 0 or test_envelope.get("decisions", [{}])[0].get("action") != "warn":
+            raise SmokeFailure("install/policy-extension policy test did not propagate warn")
+        if counter_path.read_text(encoding="utf-8") != "1":
+            raise SmokeFailure("install/policy-extension policy test did not invoke exactly once")
+
+        install_args = [
+            str(LPM_BIN),
+            "--json",
+            "install",
+            "--timing",
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+        cases = [
+            ("allow", "enforce", "block", None, True, "allow_count"),
+            ("warn", "enforce", "block", None, True, "warn_count"),
+            ("block", "report", "warn", None, True, "block_count"),
+            ("block", "enforce", "block", None, False, None),
+            ("allow", "enforce", "warn", 17, True, "error_count"),
+            ("allow", "enforce", "block", 19, False, None),
+        ]
+        previous_count = 1
+        for index, (action, mode, on_error, forced_exit, should_succeed, counter_field) in enumerate(cases):
+            write_policy_smoke_extension(
+                home_root,
+                script_path,
+                counter_path,
+                action=action,
+                mode=mode,
+                on_error=on_error,
+                forced_exit=forced_exit,
+            )
+            result = run_command_result(
+                f"install/policy-extension propagation case {index + 1}",
+                project,
+                install_args,
+                extra_env=env,
+            )
+            if (result.returncode == 0) != should_succeed:
+                raise SmokeFailure(
+                    "install/policy-extension propagation returned the wrong exit status for "
+                    f"action={action}, mode={mode}, on-error={on_error}, exit={forced_exit}"
+                )
+            current_count = int(counter_path.read_text(encoding="utf-8"))
+            if current_count != previous_count + 1:
+                raise SmokeFailure("install/policy-extension install did not launch exactly once")
+            previous_count = current_count
+            if should_succeed and counter_field is not None:
+                envelope = parse_json_stdout(
+                    f"install/policy-extension propagation case {index + 1}", result
+                )
+                stats = envelope.get("timing", {}).get("policy_extensions", {})
+                if stats.get(counter_field) != 1:
+                    raise SmokeFailure(
+                        f"install/policy-extension expected {counter_field}=1, got {stats!r}"
+                    )
+
+
+def assert_install_hash_linker(project: Path, expected: str, context: str) -> None:
+    install_hash = read_optional_text(project / ".lpm" / "install-hash")
+    if f"l:{expected}" not in install_hash.splitlines():
+        raise SmokeFailure(f"{context}: expected install hash linker {expected!r}\n{install_hash}")
+
+
+def scenario_install_linker_transitions() -> None:
+    parent_name = "linker-parent"
+    child_name = "linker-child"
+    stale_name = "linker-stale"
+    registry_packages = [
+        {
+            "name": parent_name,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {child_name: "1.0.0"}},
+                    "package_json_extra": {"dependencies": {child_name: "1.0.0"}},
+                    "files": {},
+                }
+            },
+        },
+        {
+            "name": child_name,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {},
+                }
+            },
+        },
+        {
+            "name": stale_name,
+            "dist_tags": {"latest": "1.0.0"},
+            "versions": {
+                "1.0.0": {
+                    "metadata_extra": {
+                        "dependencies": {},
+                        "bin": {"stale-smoke-bin": "bin/stale.js"},
+                    },
+                    "package_json_extra": {"bin": {"stale-smoke-bin": "bin/stale.js"}},
+                    "files": {"bin/stale.js": "#!/usr/bin/env node\nconsole.log('stale')\n"},
+                }
+            },
+        },
+    ]
+
+    with MockRegistry(registry_packages) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-linker-"
+    ) as project_root, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
+        project = Path(project_root)
+        manifest = {
+            "name": "linker-transition-smoke",
+            "private": True,
+            "version": "1.0.0",
+            "dependencies": {parent_name: "1.0.0", stale_name: "1.0.0"},
+            "lpm": {"linker": "isolated"},
+        }
+        write_package_json(project / "package.json", manifest)
+        write_registry_npmrc(project, registry.registry_url)
+        env = smoke_home_env(home_root, LPM_LINKER="hoisted")
+        install_args = [
+            str(LPM_BIN),
+            "install",
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+
+        run_command(
+            "install/linker env beats package config",
+            project,
+            install_args,
+            extra_env=env,
+        )
+        assert_install_hash_linker(
+            project, "hoisted", "install/linker env beats package config"
+        )
+        require_exists(project / "node_modules" / parent_name)
+        hoisted_parent_target = (project / "node_modules" / parent_name).resolve(strict=True)
+        require_exists(hoisted_parent_target.parent / child_name)
+        require_exists(project / "node_modules" / ".bin" / "stale-smoke-bin")
+
+        manifest["dependencies"] = {parent_name: "1.0.0"}
+        write_package_json(project / "package.json", manifest)
+        config_path = Path(smoke_home_path(home_root)) / "config.toml"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        config_path.write_text('linker = "isolated"\n', encoding="utf-8")
+        isolated_result = run_command_result(
+            "install/linker global config beats env and removes stale links",
+            project,
+            install_args,
+            extra_env=env,
+        )
+        if isolated_result.returncode != 0:
+            raise SmokeFailure("install/linker transition to isolated failed")
+        if "up to date" in (isolated_result.stdout + isolated_result.stderr).lower():
+            raise SmokeFailure("install/linker mode transition did not invalidate the install hash")
+        assert_install_hash_linker(
+            project,
+            "isolated",
+            "install/linker global config beats env",
+        )
+        require_not_exists(project / "node_modules" / stale_name)
+        require_not_exists(project / "node_modules" / ".bin" / "stale-smoke-bin")
+        isolated_parent_target = (project / "node_modules" / parent_name).resolve(strict=True)
+        require_exists(isolated_parent_target.parent / child_name)
+        if isolated_parent_target == hoisted_parent_target:
+            raise SmokeFailure(
+                "install/linker transition reused the hoisted link entry for isolated mode"
+            )
+
+        hoisted_result = run_command_result(
+            "install/linker CLI beats global config",
+            project,
+            [*install_args, "--linker", "hoisted"],
+            extra_env=env,
+        )
+        if hoisted_result.returncode != 0:
+            raise SmokeFailure("install/linker transition back to hoisted failed")
+        if "up to date" in (hoisted_result.stdout + hoisted_result.stderr).lower():
+            raise SmokeFailure("install/linker CLI transition did not invalidate the install hash")
+        assert_install_hash_linker(
+            project,
+            "hoisted",
+            "install/linker CLI beats global config",
+        )
+        require_not_exists(project / "node_modules" / stale_name)
+        require_not_exists(project / "node_modules" / ".bin" / "stale-smoke-bin")
+        final_parent_target = (project / "node_modules" / parent_name).resolve(strict=True)
+        require_exists(final_parent_target.parent / child_name)
+        if final_parent_target == isolated_parent_target:
+            raise SmokeFailure(
+                "install/linker CLI transition reused the isolated link entry for hoisted mode"
+            )
+
+
+def scenario_install_encrypted_env_push_pull() -> None:
+    auth_token = "smoke-env-session-access-token"
+    refresh_token = "smoke-env-session-refresh-token"
+    vault_id = "vault-smoke-encrypted-sync"
+    plaintext_values = ["push-secret-value", "remote-replacement-value"]
+
+    with MockVaultSync(auth_token, vault_id) as sync, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-env-sync-"
+    ) as project_root, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
+        project = Path(project_root)
+        write_package_json(
+            project / "package.json",
+            {"name": "encrypted-env-sync-smoke", "private": True, "version": "1.0.0"},
+        )
+        project.joinpath("lpm.json").write_text(
+            json.dumps({"vault": vault_id}, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        env = smoke_home_env(
+            home_root,
+            LPM_FORCE_FILE_AUTH="1",
+            LPM_FORCE_FILE_VAULT="1",
+            LPM_TEST_FAST_SCRYPT="1",
+            LPM_REGISTRY_URL=sync.url,
+        )
+        seed_refresh_backed_session(
+            env,
+            sync.url,
+            auth_token,
+            refresh_token,
+            "2030-01-01T00:00:00Z",
+        )
+
+        for assignment in [
+            f"KEEP={plaintext_values[0]}",
+            f"REMOVE_ME={plaintext_values[1]}",
+        ]:
+            run_command(
+                "install/env-sync seed local encrypted value",
+                project,
+                [str(LPM_BIN), "env", "set", assignment],
+                extra_env=env,
+            )
+
+        push_result = run_command_result(
+            "install/env-sync encrypted push",
+            project,
+            [str(LPM_BIN), "--json", "env", "push", "--yes"],
+            extra_env=env,
+        )
+        push_envelope = parse_json_stdout("install/env-sync encrypted push", push_result)
+        if push_result.returncode != 0 or push_envelope.get("success") is not True:
+            raise SmokeFailure("install/env-sync encrypted push must succeed")
+        post_requests = sync.requests("POST")
+        if len(post_requests) != 1:
+            raise SmokeFailure("install/env-sync expected one authenticated push request")
+        push_request = post_requests[0]
+        if push_request.get("headers", {}).get("authorization") != f"Bearer {auth_token}":
+            raise SmokeFailure("install/env-sync push omitted bearer authentication")
+        push_body_bytes = push_request.get("body")
+        if not isinstance(push_body_bytes, bytes):
+            raise SmokeFailure("install/env-sync push request body was not captured")
+        push_body = json.loads(push_body_bytes)
+        for field in ["encryptedBlob", "wrappedKey", "cryptoVersion"]:
+            if field not in push_body:
+                raise SmokeFailure(f"install/env-sync push omitted {field}")
+        request_text = push_body_bytes.decode("utf-8", errors="replace")
+        for secret in plaintext_values:
+            if secret in request_text:
+                raise SmokeFailure("install/env-sync push leaked plaintext secret material")
+
+        run_command(
+            "install/env-sync mutate local KEEP",
+            project,
+            [str(LPM_BIN), "env", "set", "KEEP=local-only-change"],
+            extra_env=env,
+        )
+        run_command(
+            "install/env-sync add local-only value",
+            project,
+            [str(LPM_BIN), "env", "set", "LOCAL_ONLY=remove-on-pull"],
+            extra_env=env,
+        )
+        pull_result = run_command_result(
+            "install/env-sync exact pull replacement",
+            project,
+            [str(LPM_BIN), "--json", "env", "pull", "--yes"],
+            extra_env=env,
+        )
+        pull_envelope = parse_json_stdout(
+            "install/env-sync exact pull replacement", pull_result
+        )
+        if pull_result.returncode != 0 or pull_envelope.get("success") is not True:
+            raise SmokeFailure("install/env-sync encrypted pull must succeed")
+        get_requests = sync.requests("GET")
+        if len(get_requests) != 1 or get_requests[0].get("headers", {}).get("authorization") != f"Bearer {auth_token}":
+            raise SmokeFailure("install/env-sync pull did not use authenticated sync exactly once")
+
+        list_result = run_command_result(
+            "install/env-sync inspect exact replacement",
+            project,
+            [str(LPM_BIN), "--json", "env", "list", "--reveal"],
+            extra_env=env,
+        )
+        if list_result.returncode != 0:
+            raise SmokeFailure("install/env-sync could not inspect pulled values")
+        pulled = json.loads(list_result.stdout)
+        if pulled != {"KEEP": plaintext_values[0], "REMOVE_ME": plaintext_values[1]}:
+            raise SmokeFailure(
+                f"install/env-sync pull did not replace local state exactly: {pulled!r}"
+            )
+
+        run_command(
+            "install/env-sync stage conflict value",
+            project,
+            [str(LPM_BIN), "env", "set", "CONFLICT=preserve-local"],
+            extra_env=env,
+        )
+        vault_path = Path(smoke_home_path(home_root)) / "vaults" / f"{vault_id}.enc"
+        local_before_conflict = vault_path.read_bytes()
+        config_before_conflict = project.joinpath("lpm.json").read_bytes()
+        sync.conflict_push = True
+        conflict_result = run_command_result(
+            "install/env-sync version conflict rollback",
+            project,
+            [str(LPM_BIN), "--json", "env", "push", "--yes"],
+            extra_env=env,
+        )
+        if conflict_result.returncode == 0:
+            raise SmokeFailure("install/env-sync version conflict unexpectedly succeeded")
+        conflict_envelope = parse_json_stdout(
+            "install/env-sync version conflict rollback", conflict_result
+        )
+        if conflict_envelope.get("success") is not False:
+            raise SmokeFailure("install/env-sync conflict must emit success=false")
+        if vault_path.read_bytes() != local_before_conflict:
+            raise SmokeFailure("install/env-sync conflict mutated the local encrypted vault")
+        if project.joinpath("lpm.json").read_bytes() != config_before_conflict:
+            raise SmokeFailure("install/env-sync conflict mutated local sync metadata")
+
+        requests_before_invalid = len(sync.requests())
+        project.joinpath("lpm.json").write_text(
+            json.dumps({"vault": vault_id, "env": {"prod": 123}}),
+            encoding="utf-8",
+        )
+        invalid_result = run_command_result(
+            "install/env-sync malformed config sends zero requests",
+            project,
+            [str(LPM_BIN), "env", "pull", "--yes"],
+            extra_env=env,
+        )
+        if invalid_result.returncode == 0:
+            raise SmokeFailure("install/env-sync malformed config unexpectedly succeeded")
+        if len(sync.requests()) != requests_before_invalid:
+            raise SmokeFailure("install/env-sync malformed config performed a network request")
+
+
+def wait_for_registry_request(
+    registry: MockRegistry,
+    path: str,
+    *,
+    minimum: int = 1,
+    timeout_seconds: float = 10.0,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        if len(registry.request_details(path=path)) >= minimum:
+            return
+        time.sleep(0.025)
+    raise SmokeFailure(f"timed out waiting for {minimum} request(s) to {path}")
+
+
+def require_json_or_absent(path: Path, context: str) -> None:
+    if not path.exists():
+        return
+    try:
+        json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise SmokeFailure(f"{context}: present JSON file is malformed: {error}") from error
+
+
+def require_toml_or_absent(path: Path, context: str) -> None:
+    if not path.exists():
+        return
+    try:
+        tomllib.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise SmokeFailure(f"{context}: present TOML file is malformed: {error}") from error
+
+
+def scenario_install_concurrency_recovery() -> None:
+    package_name = "concurrency-recovery-pkg"
+    version = "1.0.0"
+    tarball_path = f"/tarballs/{package_name}/-/{package_name}-{version}.tgz"
+    registry_packages = [
+        {
+            "name": package_name,
+            "dist_tags": {"latest": version},
+            "versions": {
+                version: {
+                    "metadata_extra": {"dependencies": {}},
+                    "package_json_extra": {},
+                    "files": {"payload.txt": "x" * (512 * 1024)},
+                }
+            },
+        }
+    ]
+    with MockRegistry(
+        registry_packages,
+        slow_route_delays={tarball_path: 2.0},
+    ) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-smoke-concurrency-"
+    ) as project_root, tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
+        project = Path(project_root)
+        write_package_json(
+            project / "package.json",
+            {
+                "name": "install-concurrency-recovery-smoke",
+                "private": True,
+                "version": "1.0.0",
+                "dependencies": {package_name: version},
+            },
+        )
+        write_registry_npmrc(project, registry.registry_url)
+        env = merged_env(smoke_home_env(home_root))
+        args = [
+            str(LPM_BIN),
+            "install",
+            "--no-skills",
+            "--no-editor-setup",
+            "--no-security-summary",
+        ]
+        log(f"install/concurrency first process: {' '.join(args)}")
+        first = subprocess.Popen(
+            args,
+            cwd=project,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        second: subprocess.Popen[str] | None = None
+        try:
+            wait_for_registry_request(registry, tarball_path)
+            log(f"install/concurrency second process: {' '.join(args)}")
+            second = subprocess.Popen(
+                args,
+                cwd=project,
+                env=env,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            time.sleep(0.15)
+            first.kill()
+            first_stdout, first_stderr = first.communicate(timeout=10)
+            if first_stdout:
+                sys.stdout.write(first_stdout)
+            if first_stderr:
+                sys.stderr.write(first_stderr)
+            second_stdout, second_stderr = second.communicate(timeout=60)
+            if second_stdout:
+                sys.stdout.write(second_stdout)
+            if second_stderr:
+                sys.stderr.write(second_stderr)
+            if first.returncode == 0:
+                raise SmokeFailure(
+                    "install/concurrency first process completed before interruption"
+                )
+            if second.returncode != 0:
+                raise SmokeFailure(
+                    "install/concurrency surviving process failed after the overlapping installer was interrupted"
+                )
+        finally:
+            if first.poll() is None:
+                first.kill()
+                first.communicate(timeout=5)
+            if second is not None and second.poll() is None:
+                second.kill()
+                second.communicate(timeout=5)
+
+        require_json_or_absent(
+            project / "package.json",
+            "install/concurrency manifest after interrupted overlap",
+        )
+        require_toml_or_absent(
+            project / "lpm.lock",
+            "install/concurrency lockfile after interrupted overlap",
+        )
+        if (project / "lpm.lockb").exists() and (project / "lpm.lockb").stat().st_size == 0:
+            raise SmokeFailure("install/concurrency left a zero-byte binary lockfile")
+
+        registry.clear_slow_route_delays()
+        recovery = run_command_result(
+            "install/concurrency clean rerun converges",
+            project,
+            args,
+            extra_env=smoke_home_env(home_root),
+        )
+        if recovery.returncode != 0:
+            raise SmokeFailure("install/concurrency clean rerun did not converge")
+        require_json_or_absent(project / "package.json", "install/concurrency recovered manifest")
+        require_toml_or_absent(project / "lpm.lock", "install/concurrency recovered lockfile")
+        require_exists(project / "node_modules" / package_name / "package.json")
+        require_exists(project / ".lpm" / "install-hash")
+        final_manifest = read_json_file(project / "package.json")
+        if final_manifest.get("dependencies", {}).get(package_name) != version:
+            raise SmokeFailure("install/concurrency recovery lost the declared dependency")
+
+
 SCENARIOS = {
+    "install-source-protocol-matrix": (
+        "Run file/link identity and refresh, GitHub branch locking with offline replay, JSR folded-name routing, and unsafe source URL rejection coverage.",
+        scenario_install_source_protocol_matrix,
+    ),
+    "install-version-release": (
+        "Run Git-backed version and workspace release coverage for dry-run immutability, commit/tag creation, dirty-tree refusal, internal-range updates, and publish ordering without registry writes.",
+        scenario_install_version_release,
+    ),
+    "install-licenses-installed-tree": (
+        "Run installed-tree license coverage across hoisted and isolated layouts, including transitive discovery, missing/copyleft gates, exact denies, JSON contracts, and exit codes.",
+        scenario_install_licenses_installed_tree,
+    ),
+    "install-policy-extension-boundary": (
+        "Run policy extension execution-boundary coverage across list, status, doctor, test, and install with allow, warn, deny, report, enforce, and error behavior.",
+        scenario_install_policy_extension_boundary,
+    ),
+    "install-linker-transitions": (
+        "Run linker precedence and transition coverage across package, environment, global, and CLI configuration with install-hash invalidation and stale link/wrapper cleanup.",
+        scenario_install_linker_transitions,
+    ),
+    "install-encrypted-env-push-pull": (
+        "Run authenticated encrypted env push/pull coverage for ciphertext-only requests, exact replacement, version-conflict rollback, and malformed-config request suppression.",
+        scenario_install_encrypted_env_push_pull,
+    ),
+    "install-concurrency-recovery": (
+        "Run overlapping packaged CLI installs with one interrupted tarball transfer, validate transactional files, and prove a clean rerun converges.",
+        scenario_install_concurrency_recovery,
+    ),
     "install-prod-omit": (
         "Run production and omitted-dependency coverage across cold, warm, offline, and frozen installs while preserving the complete lockfile graph and required production peers.",
         scenario_install_prod_omit,
@@ -29464,6 +31107,7 @@ SCENARIOS = {
 }
 
 OPT_IN_SCENARIOS = {
+    "install-concurrency-recovery",
     "install-ecosystem-build",
 }
 

@@ -22,6 +22,13 @@ Use `python3 run_smokes.py install-ecosystem-build` to run the separate opt-in
 heavy installed-app build/runtime canary across Next/Turbopack, Vite, Angular,
 Astro, SvelteKit, Nuxt, and React Router.
 
+The generated high-priority scenarios cover source protocols, version/release
+flows, installed-tree licenses, policy extension boundaries, linker transitions,
+and encrypted env synchronization. `install-concurrency-recovery` is opt-in
+because it deliberately overlaps two installers and interrupts one during a
+slow tarball transfer. Existing catalog and graph scenarios also cover unused
+and resolved catalog views plus transitive `why` path parity.
+
 Use `LPM_SMOKE_NATIVE_SECURITY_UNLOCK=1 python3 run_smokes.py install-security`
 to opt into the native macOS approval dialog path for `lpm security unlock`.
 Without that env var, the security smoke only covers the automatable refusal and
