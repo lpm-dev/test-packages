@@ -1187,6 +1187,9 @@ MUTABLE_FIXTURE_TREES = (
     ROOT / "workspace",
 )
 
+ScriptedRegistryResponse = tuple[int, str, dict[str, str], bytes]
+ScriptedRegistryRoutes = dict[tuple[str, str], list[ScriptedRegistryResponse]]
+
 
 class LocalRegistryRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
@@ -1285,6 +1288,41 @@ class LocalRegistryRequestHandler(BaseHTTPRequestHandler):
                 self.wfile.write(body)
             return
 
+        scripted_key = (self.command, path)
+        scripted_response: ScriptedRegistryResponse | None = None
+        scripted_route_configured = False
+        with self.server.scripted_routes_lock:
+            if scripted_key in self.server.scripted_routes:
+                scripted_route_configured = True
+                responses = self.server.scripted_routes[scripted_key]
+                if responses:
+                    scripted_response = responses.pop(0)
+        if scripted_route_configured:
+            if scripted_response is None:
+                body = (
+                    f"scripted registry route exhausted: {self.command} {path}\n"
+                ).encode("utf-8")
+                self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                if include_body:
+                    self.wfile.write(body)
+                return
+
+            status_code, content_type, headers, body = scripted_response
+            self.send_response(status_code)
+            if content_type:
+                self.send_header("Content-Type", content_type)
+            for key, value in headers.items():
+                if key.lower() not in {"content-length", "content-type"}:
+                    self.send_header(key, value)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if include_body and body:
+                self.wfile.write(body)
+            return
+
         method_route = self.server.method_routes.get((self.command, path))
         if method_route is not None:
             status_code, content_type, body = method_route
@@ -1329,6 +1367,8 @@ class LocalRegistryServer(ThreadingHTTPServer):
         self.request_log: list[tuple[str, str]] = []
         self.request_details: list[dict[str, object]] = []
         self.method_routes: dict[tuple[str, str], tuple[int, str, bytes]] = {}
+        self.scripted_routes: ScriptedRegistryRoutes = {}
+        self.scripted_routes_lock = threading.Lock()
         self.token_replace_response: dict[str, object] | None = None
         self.accept_publish_put = False
         self.publish_response: dict[str, object] | None = None
@@ -1349,6 +1389,7 @@ class MockRegistry:
         publish_response: dict[str, object] | None = None,
         extra_routes: dict[str, tuple[str, bytes]] | None = None,
         extra_method_routes: dict[tuple[str, str], tuple[int, str, bytes]] | None = None,
+        scripted_routes: ScriptedRegistryRoutes | None = None,
         slow_route_delays: dict[str, float] | None = None,
     ):
         self._packages = packages
@@ -1361,6 +1402,9 @@ class MockRegistry:
         self._publish_response = publish_response
         self._extra_routes = dict(extra_routes or {})
         self._extra_method_routes = dict(extra_method_routes or {})
+        self._scripted_routes = {
+            key: list(responses) for key, responses in (scripted_routes or {}).items()
+        }
         self._slow_route_delays = dict(slow_route_delays or {})
         self._server: LocalRegistryServer | None = None
         self._thread: threading.Thread | None = None
@@ -1369,6 +1413,9 @@ class MockRegistry:
         self._server = LocalRegistryServer({})
         self._server.routes = self._build_routes(self.registry_url)
         self._server.method_routes = self._build_method_routes()
+        self._server.scripted_routes = {
+            key: list(responses) for key, responses in self._scripted_routes.items()
+        }
         self._server.token_replace_response = self._token_replace_response
         self._server.accept_publish_put = self._accept_publish_put
         self._server.publish_response = self._publish_response
@@ -1510,6 +1557,35 @@ class MockRegistry:
         if path is not None:
             rows = [row for row in rows if row.get("path") == path]
         return rows
+
+    def set_scripted_responses(
+        self,
+        method: str,
+        path: str,
+        responses: list[ScriptedRegistryResponse],
+    ) -> None:
+        if self._server is None:
+            raise SmokeFailure("mock registry accessed before startup")
+        key = (method.upper(), path)
+        with self._server.scripted_routes_lock:
+            self._server.scripted_routes[key] = list(responses)
+
+    def require_scripted_responses_consumed(
+        self,
+        method: str,
+        path: str,
+        context: str,
+    ) -> None:
+        if self._server is None:
+            raise SmokeFailure("mock registry accessed before startup")
+        key = (method.upper(), path)
+        with self._server.scripted_routes_lock:
+            remaining = len(self._server.scripted_routes.get(key, []))
+        if remaining:
+            raise SmokeFailure(
+                f"{context}: expected every scripted response to be consumed, "
+                f"but {remaining} remain for {key[0]} {key[1]}"
+            )
 
     def clear_slow_route_delays(self) -> None:
         if self._server is None:
@@ -3588,6 +3664,69 @@ def build_registry_version_metadata(
         },
         **metadata_extra,
     }
+
+
+def build_registry_packument_body(
+    registry_url: str,
+    name: str,
+    versions: dict[str, dict[str, object]],
+    *,
+    latest: str,
+) -> bytes:
+    metadata_versions: dict[str, object] = {}
+    time_map: dict[str, str] = {}
+    for version, spec in versions.items():
+        tarball = spec["tarball"]
+        if not isinstance(tarball, bytes):
+            raise SmokeFailure(
+                f"registry packument fixture {name}@{version}: tarball must be bytes"
+            )
+        tarball_path = spec.get(
+            "tarball_path",
+            f"tarballs/{name}/-/{name}-{version}.tgz",
+        )
+        if not isinstance(tarball_path, str):
+            raise SmokeFailure(
+                f"registry packument fixture {name}@{version}: tarball_path must be text"
+            )
+        dist: dict[str, object] = {
+            "tarball": f"{registry_url}{tarball_path.lstrip('/')}",
+            "integrity": compute_sha512_sri(tarball),
+        }
+        dist_extra = spec.get("dist_extra", {})
+        if not isinstance(dist_extra, dict):
+            raise SmokeFailure(
+                f"registry packument fixture {name}@{version}: dist_extra must be an object"
+            )
+        dist.update(dist_extra)
+        metadata_extra = spec.get("metadata_extra", {})
+        if not isinstance(metadata_extra, dict):
+            raise SmokeFailure(
+                f"registry packument fixture {name}@{version}: metadata_extra must be an object"
+            )
+        metadata_versions[version] = {
+            "name": name,
+            "version": version,
+            "dist": dist,
+            "dependencies": {},
+            **metadata_extra,
+        }
+        published_at = spec.get("published_at", "2024-01-01T00:00:00.000Z")
+        if not isinstance(published_at, str):
+            raise SmokeFailure(
+                f"registry packument fixture {name}@{version}: published_at must be text"
+            )
+        time_map[version] = published_at
+
+    return json.dumps(
+        {
+            "name": name,
+            "dist-tags": {"latest": latest},
+            "versions": metadata_versions,
+            "time": time_map,
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
 
 
 def write_package_json(path: Path, payload: dict[str, object]) -> None:
@@ -13300,6 +13439,267 @@ process.stdout.write(\"remote-build-output\\n\")
                     )
 
 
+def scenario_install_metadata_cache_policy() -> None:
+    install_flags = ["--no-skills", "--no-editor-setup", "--no-security-summary"]
+    package_names = {
+        "max_age": "smoke-metadata-max-age",
+        "no_cache": "smoke-metadata-no-cache",
+        "no_store": "smoke-metadata-no-store",
+    }
+    tarballs = {
+        name: build_package_tarball(name, "1.0.0", {}, {})
+        for name in package_names.values()
+    }
+    tarball_routes = {
+        f"/tarballs/{name}/-/{name}-1.0.0.tgz": (
+            "application/octet-stream",
+            tarball,
+        )
+        for name, tarball in tarballs.items()
+    }
+
+    def packument(registry: MockRegistry, package_name: str) -> bytes:
+        return build_registry_packument_body(
+            registry.registry_url,
+            package_name,
+            {"1.0.0": {"tarball": tarballs[package_name]}},
+            latest="1.0.0",
+        )
+
+    def run_fresh_install(
+        label: str,
+        home_root: str,
+        registry: MockRegistry,
+        package_name: str,
+    ) -> subprocess.CompletedProcess[str]:
+        with tempfile.TemporaryDirectory(
+            prefix="lpm-metadata-cache-policy-project-"
+        ) as project_dir:
+            project = Path(project_dir)
+            write_package_json(
+                project / "package.json",
+                {
+                    "name": f"{package_name}-consumer",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {package_name: "1.0.0"},
+                },
+            )
+            write_registry_npmrc(project, registry.registry_url)
+            result = run_command_result(
+                label,
+                project,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=smoke_home_env(home_root),
+            )
+            if result.returncode != 0:
+                raise SmokeFailure(f"{label} failed with exit code {result.returncode}")
+            if read_installed_package_version(project, package_name) != "1.0.0":
+                raise SmokeFailure(f"{label}: expected the scripted package to be installed")
+            return result
+
+    def metadata_requests(
+        registry: MockRegistry,
+        package_name: str,
+    ) -> list[dict[str, object]]:
+        return registry.request_details(method="GET", path=f"/{package_name}")
+
+    with MockRegistry(
+        [],
+        serve_proxy_metadata=False,
+        extra_routes=tarball_routes,
+    ) as registry:
+        max_age_name = package_names["max_age"]
+        max_age_path = f"/{max_age_name}"
+        max_age_body = packument(registry, max_age_name)
+        registry.set_scripted_responses(
+            "GET",
+            max_age_path,
+            [
+                (
+                    200,
+                    "application/json",
+                    {
+                        "Cache-Control": "max-age=1, must-revalidate",
+                        "ETag": '"max-age-v1"',
+                    },
+                    max_age_body,
+                ),
+                (
+                    304,
+                    "application/json",
+                    {
+                        "Cache-Control": "max-age=300, must-revalidate",
+                        "ETag": '"max-age-v2"',
+                    },
+                    b"",
+                ),
+            ],
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="lpm-metadata-max-age-home-"
+        ) as home_root:
+            run_fresh_install(
+                "install/metadata-cache max-age initial",
+                home_root,
+                registry,
+                max_age_name,
+            )
+            run_fresh_install(
+                "install/metadata-cache max-age fresh process hit",
+                home_root,
+                registry,
+                max_age_name,
+            )
+            if len(metadata_requests(registry, max_age_name)) != 1:
+                raise SmokeFailure(
+                    "install/metadata-cache max-age: a fresh persisted entry must avoid network access"
+                )
+            time.sleep(1.25)
+            run_fresh_install(
+                "install/metadata-cache max-age stale revalidation",
+                home_root,
+                registry,
+                max_age_name,
+            )
+            run_fresh_install(
+                "install/metadata-cache max-age refreshed process hit",
+                home_root,
+                registry,
+                max_age_name,
+            )
+        max_age_requests = metadata_requests(registry, max_age_name)
+        if len(max_age_requests) != 2:
+            raise SmokeFailure(
+                "install/metadata-cache max-age: expected one fetch and one revalidation"
+            )
+        max_age_headers = [row.get("headers", {}) for row in max_age_requests]
+        if not isinstance(max_age_headers[0], dict) or max_age_headers[0].get(
+            "if-none-match"
+        ) is not None:
+            raise SmokeFailure(
+                "install/metadata-cache max-age: initial request must be unconditional"
+            )
+        if not isinstance(max_age_headers[1], dict) or max_age_headers[1].get(
+            "if-none-match"
+        ) != '"max-age-v1"':
+            raise SmokeFailure(
+                "install/metadata-cache max-age: stale request must use the persisted ETag"
+            )
+        registry.require_scripted_responses_consumed(
+            "GET",
+            max_age_path,
+            "install/metadata-cache max-age",
+        )
+
+        no_cache_name = package_names["no_cache"]
+        no_cache_path = f"/{no_cache_name}"
+        no_cache_body = packument(registry, no_cache_name)
+        registry.set_scripted_responses(
+            "GET",
+            no_cache_path,
+            [
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "no-cache", "ETag": '"no-cache-v1"'},
+                    no_cache_body,
+                ),
+                (
+                    304,
+                    "application/json",
+                    {"Cache-Control": "no-cache", "ETag": '"no-cache-v2"'},
+                    b"",
+                ),
+                (
+                    304,
+                    "application/json",
+                    {"Cache-Control": "no-cache", "ETag": '"no-cache-v3"'},
+                    b"",
+                ),
+            ],
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="lpm-metadata-no-cache-home-"
+        ) as home_root:
+            for index in range(3):
+                run_fresh_install(
+                    f"install/metadata-cache no-cache process {index + 1}",
+                    home_root,
+                    registry,
+                    no_cache_name,
+                )
+        no_cache_requests = metadata_requests(registry, no_cache_name)
+        no_cache_validators: list[str | None] = []
+        for row in no_cache_requests:
+            headers = row.get("headers", {})
+            no_cache_validators.append(
+                headers.get("if-none-match") if isinstance(headers, dict) else None
+            )
+        if no_cache_validators != [None, '"no-cache-v1"', '"no-cache-v2"']:
+            raise SmokeFailure(
+                "install/metadata-cache no-cache: every later process must conditionally "
+                f"revalidate, got validators {no_cache_validators!r}"
+            )
+        registry.require_scripted_responses_consumed(
+            "GET",
+            no_cache_path,
+            "install/metadata-cache no-cache",
+        )
+
+        no_store_name = package_names["no_store"]
+        no_store_path = f"/{no_store_name}"
+        no_store_body = packument(registry, no_store_name)
+        registry.set_scripted_responses(
+            "GET",
+            no_store_path,
+            [
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "no-store", "ETag": '"no-store-v1"'},
+                    no_store_body,
+                ),
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "no-store", "ETag": '"no-store-v2"'},
+                    no_store_body,
+                ),
+            ],
+        )
+        with tempfile.TemporaryDirectory(
+            prefix="lpm-metadata-no-store-home-"
+        ) as home_root:
+            for index in range(2):
+                run_fresh_install(
+                    f"install/metadata-cache no-store process {index + 1}",
+                    home_root,
+                    registry,
+                    no_store_name,
+                )
+            require_directory_empty_or_absent(
+                Path(smoke_home_path(home_root)) / "cache" / "metadata",
+                "install/metadata-cache no-store",
+            )
+        no_store_requests = metadata_requests(registry, no_store_name)
+        if len(no_store_requests) != 2:
+            raise SmokeFailure(
+                "install/metadata-cache no-store: every process must fetch metadata"
+            )
+        for row in no_store_requests:
+            headers = row.get("headers", {})
+            if isinstance(headers, dict) and headers.get("if-none-match") is not None:
+                raise SmokeFailure(
+                    "install/metadata-cache no-store: requests must not reuse a validator"
+                )
+        registry.require_scripted_responses_consumed(
+            "GET",
+            no_store_path,
+            "install/metadata-cache no-store",
+        )
+
+
 def scenario_install_cache_command() -> None:
     with tempfile.TemporaryDirectory(prefix="lpm-smoke-home-") as home_root:
         fixture = reset_cache_command_fixture()
@@ -13409,6 +13809,152 @@ def scenario_install_cache_command() -> None:
             raise SmokeFailure(
                 "install/cache clean store marker: expected cache cleaning to leave store bytes untouched"
             )
+
+    package_name = "smoke-cache-recovery"
+    version = "1.0.0"
+    tarball = build_package_tarball(package_name, version, {}, {})
+    tarball_path = f"/tarballs/{package_name}/-/{package_name}-{version}.tgz"
+    with MockRegistry(
+        [],
+        serve_proxy_metadata=False,
+        extra_routes={tarball_path: ("application/octet-stream", tarball)},
+    ) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-cache-recovery-home-"
+    ) as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-cache-recovery-projects-"
+    ) as projects_root:
+        metadata_path = f"/{package_name}"
+        metadata_body = build_registry_packument_body(
+            registry.registry_url,
+            package_name,
+            {version: {"tarball": tarball}},
+            latest=version,
+        )
+        registry.set_scripted_responses(
+            "GET",
+            metadata_path,
+            [
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "max-age=300", "ETag": '"cache-seed"'},
+                    metadata_body,
+                ),
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "max-age=300", "ETag": '"cache-clear"'},
+                    metadata_body,
+                ),
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "max-age=300", "ETag": '"cache-repair"'},
+                    metadata_body,
+                ),
+            ],
+        )
+        scenario_env = smoke_home_env(home_root)
+        install_flags = ["--no-skills", "--no-editor-setup", "--no-security-summary"]
+
+        def cache_recovery_project(index: int) -> Path:
+            project = Path(projects_root) / f"project-{index}"
+            write_package_json(
+                project / "package.json",
+                {
+                    "name": f"cache-recovery-consumer-{index}",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {package_name: version},
+                },
+            )
+            write_registry_npmrc(project, registry.registry_url)
+            return project
+
+        def run_cache_recovery_install(index: int, label: str) -> Path:
+            project = cache_recovery_project(index)
+            result = run_command_result(
+                label,
+                project,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=scenario_env,
+            )
+            if result.returncode != 0:
+                raise SmokeFailure(f"{label} failed with exit code {result.returncode}")
+            return project
+
+        first_project = run_cache_recovery_install(
+            1,
+            "install/cache real metadata seed",
+        )
+        metadata_dir = Path(smoke_home_path(home_root)) / "cache" / "metadata"
+        metadata_files = [path for path in metadata_dir.rglob("*") if path.is_file()]
+        if len(metadata_files) != 1:
+            raise SmokeFailure(
+                "install/cache real metadata seed: expected exactly one V4 metadata entry, "
+                f"got {metadata_files!r}"
+            )
+        if not metadata_files[0].read_bytes().startswith(b"LPM-MD-V4\n"):
+            raise SmokeFailure(
+                "install/cache real metadata seed: expected a V4 metadata cache entry"
+            )
+
+        clear_metadata_result = run_command_result(
+            "install/cache clear real metadata json",
+            first_project,
+            [str(LPM_BIN), "--json", "cache", "clear", "metadata"],
+            extra_env=scenario_env,
+        )
+        if clear_metadata_result.returncode != 0:
+            raise SmokeFailure(
+                "install/cache clear real metadata json failed with exit code "
+                f"{clear_metadata_result.returncode}"
+            )
+        clear_metadata_envelope = parse_json_stdout(
+            "install/cache clear real metadata json",
+            clear_metadata_result,
+        )
+        if clear_metadata_envelope.get("success") is not True:
+            raise SmokeFailure(
+                "install/cache clear real metadata json: expected success=true"
+            )
+        require_directory_empty_or_absent(
+            metadata_dir,
+            "install/cache clear real metadata json",
+        )
+
+        run_cache_recovery_install(2, "install/cache post-clear unconditional refetch")
+        recreated_files = [path for path in metadata_dir.rglob("*") if path.is_file()]
+        if len(recreated_files) != 1:
+            raise SmokeFailure(
+                "install/cache post-clear refetch: expected one recreated metadata entry"
+            )
+        write_bytes(recreated_files[0], b"LPM-MD-V4\n")
+
+        run_cache_recovery_install(3, "install/cache corrupt entry recovery")
+        repaired_files = [path for path in metadata_dir.rglob("*") if path.is_file()]
+        if len(repaired_files) != 1 or not repaired_files[0].read_bytes().startswith(
+            b"LPM-MD-V4\n"
+        ):
+            raise SmokeFailure(
+                "install/cache corrupt entry recovery: expected one repaired V4 metadata entry"
+            )
+        metadata_requests = registry.request_details(method="GET", path=metadata_path)
+        if len(metadata_requests) != 3:
+            raise SmokeFailure(
+                "install/cache recovery: expected seed, post-clear, and post-corruption metadata fetches"
+            )
+        for row in metadata_requests:
+            headers = row.get("headers", {})
+            if isinstance(headers, dict) and headers.get("if-none-match") is not None:
+                raise SmokeFailure(
+                    "install/cache recovery: cleared or corrupt entries must refetch unconditionally"
+                )
+        registry.require_scripted_responses_consumed(
+            "GET",
+            metadata_path,
+            "install/cache recovery",
+        )
 
 
 def scenario_install_cache_prune() -> None:
@@ -28435,6 +28981,213 @@ def scenario_install_root_lifecycle() -> None:
             )
 
 
+def scenario_install_lockfile_metadata_continuity() -> None:
+    package_name = "smoke-lockfile-metadata-continuity"
+    version = "1.0.0"
+    unpacked_size = 8192
+    original_tarball = build_package_tarball(package_name, version, {}, {})
+    repacked_tarball = build_package_tarball(
+        package_name,
+        version,
+        {},
+        {"repacked.txt": "artifact identity changed\n"},
+    )
+    original_tarball_path = f"/tarballs/{package_name}/-/{package_name}-{version}.tgz"
+    repacked_tarball_path = (
+        f"/tarballs/{package_name}/-/{package_name}-{version}-repacked.tgz"
+    )
+    install_flags = [
+        "--policy",
+        "deny",
+        "--no-skills",
+        "--no-editor-setup",
+        "--no-security-summary",
+    ]
+
+    with MockRegistry(
+        [],
+        serve_proxy_metadata=False,
+        extra_routes={
+            original_tarball_path: ("application/octet-stream", original_tarball),
+            repacked_tarball_path: ("application/octet-stream", repacked_tarball),
+        },
+    ) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-lockfile-metadata-home-"
+    ) as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-lockfile-metadata-project-"
+    ) as project_dir:
+        project = Path(project_dir)
+        write_package_json(
+            project / "package.json",
+            {
+                "name": "lockfile-metadata-continuity-consumer",
+                "private": True,
+                "version": "0.0.0",
+                "dependencies": {package_name: version},
+            },
+        )
+        write_registry_npmrc(project, registry.registry_url)
+
+        metadata_with_size = build_registry_packument_body(
+            registry.registry_url,
+            package_name,
+            {
+                version: {
+                    "tarball": original_tarball,
+                    "dist_extra": {
+                        "unpackedSize": unpacked_size,
+                        "signatures": [
+                            {
+                                "keyid": "SHA256:smoke-lockfile-key",
+                                "sig": "c21va2UtbG9ja2ZpbGUtc2lnbmF0dXJl",
+                            }
+                        ],
+                    },
+                }
+            },
+            latest=version,
+        )
+        metadata_without_size = build_registry_packument_body(
+            registry.registry_url,
+            package_name,
+            {version: {"tarball": original_tarball}},
+            latest=version,
+        )
+        changed_artifact_metadata = build_registry_packument_body(
+            registry.registry_url,
+            package_name,
+            {
+                version: {
+                    "tarball": repacked_tarball,
+                    "tarball_path": repacked_tarball_path,
+                }
+            },
+            latest=version,
+        )
+        metadata_path = f"/{package_name}"
+        registry.set_scripted_responses(
+            "GET",
+            metadata_path,
+            [
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "no-store"},
+                    metadata_with_size,
+                ),
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "no-store"},
+                    metadata_without_size,
+                ),
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "no-store"},
+                    changed_artifact_metadata,
+                ),
+            ],
+        )
+
+        def run_resolution(label: str, *, force: bool) -> None:
+            args = [str(LPM_BIN), "install"]
+            if force:
+                args.append("--force")
+            args.extend(install_flags)
+            result = run_command_result(
+                label,
+                project,
+                args,
+                extra_env=smoke_home_env(home_root),
+            )
+            if result.returncode != 0:
+                raise SmokeFailure(f"{label} failed with exit code {result.returncode}")
+
+        def locked_package(context: str) -> dict[str, object]:
+            with (project / "lpm.lock").open("rb") as handle:
+                document = tomllib.load(handle)
+            matches = [
+                package
+                for package in document.get("packages", [])
+                if isinstance(package, dict) and package.get("name") == package_name
+            ]
+            if len(matches) != 1:
+                raise SmokeFailure(
+                    f"{context}: expected exactly one locked {package_name} package"
+                )
+            return matches[0]
+
+        run_resolution("install/lockfile metadata initial resolution", force=False)
+        initial_package = locked_package("install/lockfile metadata initial resolution")
+        if initial_package.get("unpacked-size") != unpacked_size:
+            raise SmokeFailure(
+                "install/lockfile metadata initial resolution: expected unpacked-size=8192"
+            )
+        if not initial_package.get("registry-signatures"):
+            raise SmokeFailure(
+                "install/lockfile metadata initial resolution: expected registry signatures "
+                "from the current packument"
+            )
+
+        run_resolution("install/lockfile metadata stable forced resolution", force=True)
+        stable_package = locked_package(
+            "install/lockfile metadata stable forced resolution"
+        )
+        if stable_package.get("unpacked-size") != unpacked_size:
+            raise SmokeFailure(
+                "install/lockfile metadata stable forced resolution: a matching artifact "
+                "must retain its prior unpacked-size hint"
+            )
+        if stable_package.get("registry-signatures"):
+            raise SmokeFailure(
+                "install/lockfile metadata stable forced resolution: absent signatures in "
+                "current metadata must not be resurrected from the prior lockfile"
+            )
+
+        run_resolution("install/lockfile metadata changed artifact", force=True)
+        changed_package = locked_package("install/lockfile metadata changed artifact")
+        if changed_package.get("unpacked-size") is not None:
+            raise SmokeFailure(
+                "install/lockfile metadata changed artifact: a changed tarball and integrity "
+                "must not inherit the prior unpacked-size hint"
+            )
+        if changed_package.get("integrity") != compute_sha512_sri(repacked_tarball):
+            raise SmokeFailure(
+                "install/lockfile metadata changed artifact: expected the repacked integrity"
+            )
+        expected_tarball_url = f"{registry.registry_url}{repacked_tarball_path.lstrip('/')}"
+        if changed_package.get("tarball") != expected_tarball_url:
+            raise SmokeFailure(
+                "install/lockfile metadata changed artifact: expected the repacked tarball URL"
+            )
+        if changed_package.get("registry-signatures"):
+            raise SmokeFailure(
+                "install/lockfile metadata changed artifact: stale signatures must remain absent"
+            )
+        require_lockfile_binary_matches_toml(
+            project,
+            "install/lockfile metadata continuity",
+        )
+        registry.require_scripted_responses_consumed(
+            "GET",
+            metadata_path,
+            "install/lockfile metadata continuity",
+        )
+        metadata_requests = registry.request_details(method="GET", path=metadata_path)
+        if len(metadata_requests) != 3:
+            raise SmokeFailure(
+                "install/lockfile metadata continuity: every no-store forced resolution "
+                "must fetch current metadata"
+            )
+        for row in metadata_requests:
+            headers = row.get("headers", {})
+            if isinstance(headers, dict) and headers.get("if-none-match") is not None:
+                raise SmokeFailure(
+                    "install/lockfile metadata continuity: no-store requests must be unconditional"
+                )
+
+
 def scenario_install_registry_auth_isolation() -> None:
     install_flags = ["--no-skills", "--no-editor-setup", "--no-security-summary"]
 
@@ -28574,6 +29327,187 @@ def scenario_install_registry_auth_isolation() -> None:
                 token,
                 "install/registry-auth output secret redaction",
             )
+
+    cache_package_name = "smoke-private-cache-partition"
+    cache_versions = ["1.0.0", "2.0.0", "3.0.0"]
+    cache_tarballs = {
+        version: build_package_tarball(cache_package_name, version, {}, {})
+        for version in cache_versions
+    }
+    cache_tarball_routes = {
+        f"/tarballs/{cache_package_name}/-/{cache_package_name}-{version}.tgz": (
+            "application/octet-stream",
+            tarball,
+        )
+        for version, tarball in cache_tarballs.items()
+    }
+    with MockRegistry(
+        [],
+        serve_proxy_metadata=False,
+        extra_routes=cache_tarball_routes,
+    ) as registry, tempfile.TemporaryDirectory(
+        prefix="lpm-registry-auth-cache-home-"
+    ) as home_root, tempfile.TemporaryDirectory(
+        prefix="lpm-registry-auth-cache-projects-"
+    ) as projects_root:
+        metadata_path = f"/{cache_package_name}"
+
+        def auth_cache_body(version: str) -> bytes:
+            return build_registry_packument_body(
+                registry.registry_url,
+                cache_package_name,
+                {version: {"tarball": cache_tarballs[version]}},
+                latest=version,
+            )
+
+        registry.set_scripted_responses(
+            "GET",
+            metadata_path,
+            [
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "max-age=300", "ETag": '"principal-a"'},
+                    auth_cache_body("1.0.0"),
+                ),
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "max-age=300", "ETag": '"principal-b"'},
+                    auth_cache_body("2.0.0"),
+                ),
+                (
+                    200,
+                    "application/json",
+                    {"Cache-Control": "max-age=300", "ETag": '"principal-anonymous"'},
+                    auth_cache_body("3.0.0"),
+                ),
+            ],
+        )
+        token_a = "smoke-cache-token-a"
+        token_b = "smoke-cache-token-b"
+        run_outputs: list[str] = []
+
+        def run_principal_install(
+            index: int,
+            label: str,
+            token: str | None,
+            expected_version: str,
+        ) -> None:
+            project = Path(projects_root) / f"project-{index}"
+            write_package_json(
+                project / "package.json",
+                {
+                    "name": f"registry-auth-cache-consumer-{index}",
+                    "private": True,
+                    "version": "0.0.0",
+                    "dependencies": {cache_package_name: "*"},
+                },
+            )
+            npmrc_lines = [f"registry={registry.registry_url}"]
+            if token is not None:
+                npmrc_lines.append(f"{auth_key(registry.registry_url)}={token}")
+            write_npmrc(project / ".npmrc", npmrc_lines)
+            result = run_command_result(
+                label,
+                project,
+                [str(LPM_BIN), "install", *install_flags],
+                extra_env=smoke_home_env(home_root),
+            )
+            if result.returncode != 0:
+                raise SmokeFailure(f"{label} failed with exit code {result.returncode}")
+            installed_version = read_installed_package_version(project, cache_package_name)
+            if installed_version != expected_version:
+                raise SmokeFailure(
+                    f"{label}: expected cached principal metadata version {expected_version}, "
+                    f"got {installed_version!r}"
+                )
+            run_outputs.append(result.stdout + result.stderr)
+
+        run_principal_install(
+            1,
+            "install/registry-auth cache token A seed",
+            token_a,
+            "1.0.0",
+        )
+        run_principal_install(
+            2,
+            "install/registry-auth cache token A warm process",
+            token_a,
+            "1.0.0",
+        )
+        run_principal_install(
+            3,
+            "install/registry-auth cache token B isolation",
+            token_b,
+            "2.0.0",
+        )
+        run_principal_install(
+            4,
+            "install/registry-auth cache anonymous isolation",
+            None,
+            "3.0.0",
+        )
+        run_principal_install(
+            5,
+            "install/registry-auth cache token A reuse",
+            token_a,
+            "1.0.0",
+        )
+
+        metadata_requests = registry.request_details(method="GET", path=metadata_path)
+        authorizations: list[str | None] = []
+        for row in metadata_requests:
+            headers = row.get("headers", {})
+            authorizations.append(
+                headers.get("authorization") if isinstance(headers, dict) else None
+            )
+        if authorizations != [f"Bearer {token_a}", f"Bearer {token_b}", None]:
+            raise SmokeFailure(
+                "install/registry-auth cache partition: expected only each principal's first "
+                f"request, got authorization sequence {authorizations!r}"
+            )
+        registry.require_scripted_responses_consumed(
+            "GET",
+            metadata_path,
+            "install/registry-auth cache partition",
+        )
+
+        combined_output = "".join(run_outputs)
+        lpm_home = Path(smoke_home_path(home_root))
+        metadata_dir = lpm_home / "cache" / "metadata"
+        metadata_files = [path for path in metadata_dir.rglob("*") if path.is_file()]
+        if len(metadata_files) < 3:
+            raise SmokeFailure(
+                "install/registry-auth cache partition: expected a distinct persistent entry "
+                "for token A, token B, and anonymous access"
+            )
+        for token in [token_a, token_b]:
+            require_not_contains(
+                combined_output,
+                token,
+                "install/registry-auth cache output secret redaction",
+            )
+            for cache_file in metadata_files:
+                require_not_contains(
+                    str(cache_file.relative_to(lpm_home)),
+                    token,
+                    "install/registry-auth cache path secret redaction",
+                )
+                if token.encode("utf-8") in cache_file.read_bytes():
+                    raise SmokeFailure(
+                        "install/registry-auth cache bytes must not contain plaintext tokens"
+                    )
+        if os.name != "nt":
+            if metadata_dir.stat().st_mode & 0o777 != 0o700:
+                raise SmokeFailure(
+                    "install/registry-auth cache directory must use Unix mode 0700"
+                )
+            for cache_file in metadata_files:
+                if cache_file.stat().st_mode & 0o777 != 0o600:
+                    raise SmokeFailure(
+                        "install/registry-auth cache files must use Unix mode 0600"
+                    )
 
     project_env_name = "@smoke-project-env/private"
     with MockRegistry([registry_package(project_env_name)]) as registry, tempfile.TemporaryDirectory(
@@ -30668,8 +31602,12 @@ SCENARIOS = {
         "Run root lifecycle coverage for documented phase ordering, dependency-install boundaries, explicit-package suppression, failure short-circuiting, and recursive workspace ordering.",
         scenario_install_root_lifecycle,
     ),
+    "install-lockfile-metadata-continuity": (
+        "Run packaged forced-resolution coverage for unpacked-size continuity across stable registry artifact identities and removal after tarball/integrity changes without resurrecting stale signatures.",
+        scenario_install_lockfile_metadata_continuity,
+    ),
     "install-registry-auth-isolation": (
-        "Run registry authentication coverage for origin-scoped metadata and tarball credentials, user/project precedence, project env-expansion refusal, and Unix npmrc permission boundaries.",
+        "Run registry authentication coverage for origin-scoped credentials, persistent metadata-cache partitioning across token and anonymous principals, secret-free owner-only cache files, config precedence, and npmrc permission boundaries.",
         scenario_install_registry_auth_isolation,
     ),
     "install-overrides": (
@@ -30729,8 +31667,12 @@ SCENARIOS = {
         scenario_install_remote_cache,
     ),
     "install-cache": (
-        "Run lpm cache coverage for path output, metadata-path JSON, clear alias semantics, blanket clean JSON, and store/cache separation.",
+        "Run lpm cache coverage for path output, clear/clean JSON, store separation, and unconditional repair after clearing or corrupting a real V4 metadata entry.",
         scenario_install_cache_command,
+    ),
+    "install-metadata-cache-policy": (
+        "Run packaged cross-process metadata-cache policy coverage for max-age freshness, ETag/304 refresh, no-cache revalidation, and no-store persistence refusal.",
+        scenario_install_metadata_cache_policy,
     ),
     "install-cache-prune": (
         "Run lpm cache prune coverage for missing-registry and corrupt-registry degraded modes plus manual-repair --project pruning with --max-age and --apply.",

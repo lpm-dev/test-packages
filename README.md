@@ -29,6 +29,13 @@ because it deliberately overlaps two installers and interrupts one during a
 slow tarball transfer. Existing catalog and graph scenarios also cover unused
 and resolved catalog views plus transitive `why` path parity.
 
+Metadata-cache coverage runs through packaged CLI process boundaries:
+`install-metadata-cache-policy` verifies freshness directives and ETag/304
+revalidation, `install-registry-auth-isolation` verifies per-principal cache
+partitioning and secret-free owner-only files, `install-cache` verifies clear
+and corruption recovery, and `install-lockfile-metadata-continuity` verifies
+safe `unpacked-size` preservation across forced resolutions.
+
 Use `LPM_SMOKE_NATIVE_SECURITY_UNLOCK=1 python3 run_smokes.py install-security`
 to opt into the native macOS approval dialog path for `lpm security unlock`.
 Without that env var, the security smoke only covers the automatable refusal and
@@ -57,7 +64,7 @@ drive real interactive `lpm add` prompts without adding project dependencies.
 - `install/read-only-routing` — mock-registry fixture for `lpm info`, `lpm resolve`, `lpm search`, and `lpm download` through project-local `.npmrc` routing without the proxy metadata path
 - `install/download` — mock-registry fixture for direct `lpm download` runs, covering canonical `--output` paths, stripped extraction layout, integrity verification, and no install side-effects
 - `install/resolve` — mock-registry fixture for direct `lpm resolve` runs, covering multi-spec JSON output, scoped last-`@` parsing, metadata-only routing, and no-download read-only behavior
-- `install/cache` — local fixture for direct `lpm cache path`, `lpm cache clean`, and `lpm cache clear` runs, covering JSON output, subcategory targeting, and the cache/store boundary
+- `install/cache` — local fixture plus mock-registry process-boundary coverage for `lpm cache path`, `lpm cache clean`, and `lpm cache clear`, including JSON output, the cache/store boundary, real V4 entry clearing, and corruption repair
 - `install/cache/prune` — local fixture for direct `lpm cache prune` runs, covering missing-registry and corrupt-registry degraded modes plus `--project`/`--max-age` orphan cleanup on a seeded v2 store
 - `install/store` — local fixture for direct `lpm store` runs, covering path output, fast-vs-deep verify semantics, `--fix` security-cache refreshes, and blunt `clean` wipes across both v1 and v2 store state
 - `install/graph` — local fixture for direct `lpm graph` runs, covering resolved tree output, substring `--filter` semantics, graph-level depth pruning across json/stats/html, and the `--no-open` warning contract
